@@ -13,6 +13,7 @@ pub mod git;
 pub mod i18n;
 pub mod kv;
 pub mod msg;
+pub mod plan;
 pub mod session;
 pub mod tmux;
 

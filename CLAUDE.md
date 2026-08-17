@@ -72,8 +72,20 @@ duet 상태는 `state/<worker-id>.duet.kv`(awaiting 턴 뮤텍스 — 어긋난 
 무시). rm은 worker에서 듀엣 전체 캐스케이드(reviewer만 rm하면 tmux+메타만),
 merge는 reviewer 세션이면 거부. ls FLOW 컬럼·TUI 타이틀에 duet:역할 표시.
 
-다음 마일스톤: M5c planner+plan.md 순회(작업마다 듀엣, 완료 시 커밋+체크박스
-갱신, 시작 전 사람의 계획 승인). docs/DESIGN.md §12.1.
+M5c 완료(설계 DESIGN.md §12.1 결정 6): `krill plan <이름> -m "목표"` →
+planner 세션이 plan.md 체크리스트 작성, Done 훅이 plan.md 확인 시
+phase=ready + needs-you(없으면 1회 재지시 후 사람에게), `krill approve
+<이름>`이 reviewer를 붙이고 **planner 세션이 그대로 duet worker가 된다**
+(맥락 누적). plan.md 자체가 작업 큐(다음 작업 = 첫 `- [ ]`, 실행 중 편집
+가능), 작업마다 duet 상태 리셋(라운드 0, goal=작업 텍스트), 작업이 duet
+통과 시 심판이 체크박스 갱신 후 그 갱신 포함 커밋(작업 1개 = 커밋 1개,
+add에서 .claude 제외·REVIEW/GATE 정리). 전부 끝나면 phase=done + ntfy.
+plan 메타는 `state/<id>.plan.kv`(krill-core/src/plan.rs — 파싱·상태 순수
+함수), 훅 체인 순서는 flow → plan(planning만) → duet. ls FLOW 컬럼에
+plan:phase 표시. **M5 완료 — 로드맵 M0~M5 전부 ✅.**
+
+다음: v0.1.0 태그 릴리스(release.yml 첫 실행 검증, Formula sha256 채우기),
+이후는 백로그(§13 리스크: --expose, 웹 리사이즈, control mode 등).
 
 ## 설계 원칙 (요약 — 상세는 DESIGN.md §4)
 

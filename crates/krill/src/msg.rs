@@ -30,6 +30,8 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
                                       다음 스테이지를 자동 릴레이 (-m = 목표, {goal})
   krill duet <이름> -m \"작업\"         worker+reviewer 턴제 핑퐁 (한 worktree)
       -a <에이전트> · --reviewer <에이전트> · --gate <명령> · --max-rounds <N>
+  krill plan <이름> -m \"목표\"         planner가 plan.md 분해 → 승인 후 작업마다 듀엣
+  krill approve <이름>                plan.md 승인 — 작업 순회 시작 (작업 1개 = 커밋 1개)
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill merge <이름> [--squash]       base에 머지 후 세션 정리 (base 체크아웃 상태에서)
@@ -64,6 +66,8 @@ usage:
                                       auto-relays the next (-m = goal, {goal})
   krill duet <name> -m \"task\"         worker+reviewer turn-based ping-pong (one worktree)
       -a <agent> · --reviewer <agent> · --gate <cmd> · --max-rounds <N>
+  krill plan <name> -m \"goal\"         planner decomposes into plan.md → duet per task
+  krill approve <name>                approve plan.md — start the task walk (1 task = 1 commit)
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill merge <name> [--squash]       merge into base + clean up (run with base checked out)
@@ -388,6 +392,66 @@ messages! {
     merge_on_reviewer(worker: &str) => {
         en: "this is the reviewer half of a duet — merge via its worker: krill merge {worker}",
         ko: "듀엣의 리뷰어 세션입니다 — worker로 머지하세요: krill merge {worker}",
+    }
+    plan_goal_required() => {
+        en: "plan needs a goal: krill plan <name> -m \"goal\"",
+        ko: "plan에는 목표가 필요합니다: krill plan <이름> -m \"목표\"",
+    }
+    plan_started() => {
+        en: "plan started — the planner is writing plan.md",
+        ko: "plan 시작 — planner가 plan.md를 작성합니다",
+    }
+    plan_prompt(goal: &str) => {
+        en: "Decompose this goal into small tasks (roughly 30 minutes each) and save them to plan.md as a markdown checklist (one `- [ ] task` line each, in execution order). Do NOT change any code yet. Goal: {goal}",
+        ko: "다음 목표를 30분 내외의 작은 작업들로 분해해 plan.md에 마크다운 체크리스트(실행 순서대로 `- [ ] 작업` 한 줄씩)로 저장하세요. 아직 코드는 수정하지 마세요. 목표: {goal}",
+    }
+    plan_replan_instruction() => {
+        en: "plan.md was not found. Write plan.md now: a markdown checklist, one `- [ ] task` line per task, in execution order. Do not change any code.",
+        ko: "plan.md가 없습니다. 지금 plan.md를 작성하세요: 실행 순서대로 `- [ ] 작업` 한 줄씩의 마크다운 체크리스트. 코드는 수정하지 마세요.",
+    }
+    plan_hint(cmd: &str) => {
+        en: "when plan.md is ready (state ◆), review it and run: {cmd}",
+        ko: "plan.md가 준비되면(상태 ◆) 검토 후 실행: {cmd}",
+    }
+    plan_not_a_plan(name: &str) => {
+        en: "'{name}' is not a plan session — start one with `krill plan <name> -m \"goal\"`.",
+        ko: "'{name}'은(는) plan 세션이 아닙니다 — `krill plan <이름> -m \"목표\"`로 시작하세요.",
+    }
+    plan_wrong_phase(name: &str, phase: &str) => {
+        en: "plan '{name}' is not awaiting approval (phase: {phase}).",
+        ko: "plan '{name}'이(가) 승인 대기 상태가 아닙니다 (phase: {phase}).",
+    }
+    plan_md_missing(name: &str) => {
+        en: "plan.md not found in the '{name}' worktree — write it (or let the planner), then approve.",
+        ko: "'{name}' worktree에 plan.md가 없습니다 — 직접 작성하거나 planner에게 시킨 뒤 승인하세요.",
+    }
+    plan_no_tasks(name: &str) => {
+        en: "plan.md of '{name}' has no open `- [ ]` tasks.",
+        ko: "'{name}'의 plan.md에 미완료 `- [ ]` 작업이 없습니다.",
+    }
+    plan_approved(open: usize, reviewer: &str) => {
+        en: "approved — walking {open} task(s) with reviewer {reviewer}. first task:",
+        ko: "승인 완료 — 작업 {open}개를 reviewer {reviewer}와 순회합니다. 첫 작업:",
+    }
+    plan_task_instruction(task: &str) => {
+        en: "Your next task (do NOT commit — krill commits when the review passes): {task}",
+        ko: "다음 작업입니다 (커밋하지 마세요 — 리뷰 통과 시 krill이 커밋합니다): {task}",
+    }
+    ntfy_plan_ready(name: &str, total: usize) => {
+        en: "plan {name} ready: {total} task(s) — review plan.md, then `krill approve {name}`",
+        ko: "plan {name} 준비됨: 작업 {total}개 — plan.md 검토 후 `krill approve {name}`",
+    }
+    ntfy_plan_no_plan(name: &str) => {
+        en: "plan {name}: the planner didn't produce plan.md — write it yourself, then `krill approve {name}`",
+        ko: "plan {name}: planner가 plan.md를 만들지 못했습니다 — 직접 작성 후 `krill approve {name}`",
+    }
+    ntfy_plan_progress(name: &str, done: usize, total: usize) => {
+        en: "plan {name}: {done}/{total} tasks done — next task started",
+        ko: "plan {name}: 작업 {done}/{total} 완료 — 다음 작업 시작",
+    }
+    ntfy_plan_done(name: &str) => {
+        en: "plan {name}: all tasks done — review and merge (krill merge {name})",
+        ko: "plan {name}: 모든 작업 완료 — 확인 후 머지하세요 (krill merge {name})",
     }
     merge_dirty(name: &str) => {
         en: "session '{name}' has uncommitted changes — commit them in the session first (krill attach {name}).",
