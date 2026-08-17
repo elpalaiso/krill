@@ -1,8 +1,10 @@
 //! M1 TUI. M1a: read-only dashboard (list + live preview + attach).
 //! M1b: actions — `n` new-session prompt, `d` diff, `x` remove modal.
+//! M1c: polish — `/` name filter, colored preview (capture-pane -e).
 //! Design doc §8.1. The TUI is a hub — heavy views (attach, diff)
 //! suspend the TUI and delegate to tmux / git's pager, then resume.
 
+use crate::ansi;
 use crate::commands;
 use crate::msg as m;
 use krill_core::config::Config;
@@ -71,6 +73,11 @@ fn sort_rows(rows: &mut [Row]) {
                 std::cmp::Reverse(b.meta.created_unix),
             ))
     });
+}
+
+/// Case-insensitive substring filter on the session name ("" = all).
+fn matches_filter(name: &str, query: &str) -> bool {
+    query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
 }
 
 /// Group headers only when more than one repo is present.
@@ -243,6 +250,7 @@ enum Mode {
     Help,
     ConfirmRm,
     New(NewPrompt),
+    Filter,
 }
 
 enum Action {
@@ -256,7 +264,8 @@ struct App {
     rows: Vec<Row>,
     items: Vec<Item>,
     selected: usize,
-    preview: String,
+    filter: String,
+    preview: Vec<Line<'static>>,
     scroll: u16,
     mode: Mode,
     flash: Option<String>,
@@ -270,7 +279,8 @@ impl App {
             rows: Vec::new(),
             items: Vec::new(),
             selected: 0,
-            preview: String::new(),
+            filter: String::new(),
+            preview: Vec::new(),
             scroll: 0,
             mode: Mode::Normal,
             flash: None,
@@ -286,6 +296,9 @@ impl App {
         let live = tmux::server_sessions();
         let mut rows = Vec::new();
         for meta in metas {
+            if !matches_filter(&meta.name, &self.filter) {
+                continue;
+            }
             let (health, age) = session::health(&meta, &live);
             let diff = if health == Health::Dead {
                 "-".into()
@@ -318,15 +331,14 @@ impl App {
 
     fn update_preview(&mut self) {
         self.preview = match self.rows.get(self.selected) {
-            None => String::new(),
-            Some(r) if r.health == Health::Dead => m::attach_dead(&r.meta.name),
-            Some(r) => match tmux::capture_pane(&r.meta.tmux) {
-                Ok(text) if !text.is_empty() => text,
-                _ => m::tui_no_output(),
+            None => Vec::new(),
+            Some(r) if r.health == Health::Dead => vec![Line::raw(m::attach_dead(&r.meta.name))],
+            Some(r) => match tmux::capture_pane_ansi(&r.meta.tmux) {
+                Ok(text) if !text.is_empty() => ansi::parse(&text),
+                _ => vec![Line::raw(m::tui_no_output())],
             },
         };
-        let lines = self.preview.lines().count() as u16;
-        self.scroll = self.scroll.min(lines.saturating_sub(1));
+        self.scroll = self.scroll.min((self.preview.len() as u16).saturating_sub(1));
     }
 
     fn select(&mut self, delta: isize) {
@@ -433,6 +445,28 @@ impl App {
                 Ok(Action::None)
             }
 
+            Mode::Filter => {
+                match code {
+                    KeyCode::Enter => {} // keep the filter, back to Normal
+                    KeyCode::Esc => {
+                        self.filter.clear();
+                        self.refresh()?;
+                    }
+                    KeyCode::Backspace => {
+                        self.filter.pop();
+                        self.mode = Mode::Filter;
+                        self.refresh()?;
+                    }
+                    KeyCode::Char(c) => {
+                        self.filter.push(c);
+                        self.mode = Mode::Filter;
+                        self.refresh()?;
+                    }
+                    _ => self.mode = Mode::Filter,
+                }
+                Ok(Action::None)
+            }
+
             Mode::Normal => {
                 match code {
                     KeyCode::Char('q') => return Ok(Action::Quit),
@@ -443,13 +477,20 @@ impl App {
                     KeyCode::Char('j') | KeyCode::Down => self.select(1),
                     KeyCode::Char('k') | KeyCode::Up => self.select(-1),
                     KeyCode::Char('J') | KeyCode::PageDown => {
-                        let max = self.preview.lines().count() as u16;
+                        let max = self.preview.len() as u16;
                         self.scroll = self.scroll.saturating_add(3).min(max.saturating_sub(1));
                     }
                     KeyCode::Char('K') | KeyCode::PageUp => {
                         self.scroll = self.scroll.saturating_sub(3)
                     }
                     KeyCode::Char('r') => self.refresh()?,
+                    KeyCode::Char('/') => self.mode = Mode::Filter,
+                    KeyCode::Esc => {
+                        if !self.filter.is_empty() {
+                            self.filter.clear();
+                            self.refresh()?;
+                        }
+                    }
                     KeyCode::Char('n') => match NewPrompt::start() {
                         Ok(p) => self.mode = Mode::New(p),
                         Err(e) => self.flash = Some(e.to_string()),
@@ -489,6 +530,14 @@ impl App {
 
     // ---- rendering ----------------------------------------------------------
 
+    fn title(&self) -> String {
+        if self.filter.is_empty() {
+            " krill ".into()
+        } else {
+            format!(" krill /{} ", self.filter)
+        }
+    }
+
     fn render(&self, f: &mut Frame) {
         let [body, bottom] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
@@ -498,7 +547,7 @@ impl App {
             f.render_widget(
                 Paragraph::new(text)
                     .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(" krill ")),
+                    .block(Block::bordered().title(self.title())),
                 body,
             );
         } else {
@@ -525,6 +574,16 @@ impl App {
                 Span::raw(value),
                 Span::styled("▏", Style::new().add_modifier(Modifier::SLOW_BLINK)),
                 Span::styled(format!("  {hint}"), Style::new().add_modifier(Modifier::DIM)),
+            ])
+        } else if matches!(self.mode, Mode::Filter) {
+            Line::from(vec![
+                Span::styled(" /", Style::new().add_modifier(Modifier::BOLD)),
+                Span::raw(self.filter.clone()),
+                Span::styled("▏", Style::new().add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled(
+                    format!("  {}", m::tui_filter_hint()),
+                    Style::new().add_modifier(Modifier::DIM),
+                ),
             ])
         } else if let Some(err) = &self.flash {
             Line::styled(format!(" {err}"), Style::new().fg(Color::Red))
@@ -573,7 +632,7 @@ impl App {
             }
         }
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(" krill ")),
+            Paragraph::new(lines).block(Block::bordered().title(self.title())),
             area,
         );
     }
@@ -592,7 +651,7 @@ impl App {
             .title(title)
             .title_bottom(Line::styled(footer, Style::new().add_modifier(Modifier::DIM)));
         f.render_widget(
-            Paragraph::new(self.preview.as_str())
+            Paragraph::new(self.preview.clone())
                 .scroll((self.scroll, 0))
                 .block(block),
             area,
@@ -777,6 +836,14 @@ mod tests {
         assert_eq!(clip("short", 13), "short");
         assert_eq!(clip("exactly-13-ch", 13), "exactly-13-ch");
         assert_eq!(clip("much-longer-than-that", 13), "much-longer-…");
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_substring() {
+        assert!(matches_filter("fix-login", ""));
+        assert!(matches_filter("fix-login", "log"));
+        assert!(matches_filter("Fix-Login", "fix-l"));
+        assert!(!matches_filter("fix-login", "xyz"));
     }
 
     #[test]

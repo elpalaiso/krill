@@ -182,16 +182,16 @@ messages! {
         ko: "정리 완료: {name}",
     }
     tui_hint() => {
-        en: "Enter attach · n new · d diff · x rm · r refresh · ? help · q quit",
-        ko: "Enter 접속 · n 새 세션 · d diff · x 정리 · r 새로고침 · ? 도움말 · q 종료",
+        en: "Enter attach · n new · d diff · x rm · / filter · ? help · q quit",
+        ko: "Enter 접속 · n 새 세션 · d diff · x 정리 · / 필터 · ? 도움말 · q 종료",
     }
     tui_help_title() => {
         en: "keys",
         ko: "키",
     }
     tui_help_body() => {
-        en: "j/k, ↑/↓       move selection\nEnter          attach (detach: Ctrl-b d)\nn              new session (name → agent → prompt)\nd / D          diff vs base (full / --stat)\nx              remove session (modal: y/f/N)\nJ/K, PgUp/PgDn scroll preview\nr              refresh now\n?              toggle this help\nq, Ctrl-c      quit (sessions keep running in tmux)",
-        ko: "j/k, ↑/↓       세션 선택 이동\nEnter          접속 (분리: Ctrl-b d)\nn              새 세션 (이름 → 에이전트 → 지시문)\nd / D          base 대비 diff (전체 / --stat)\nx              세션 정리 (모달: y/f/N)\nJ/K, PgUp/PgDn 미리보기 스크롤\nr              즉시 새로고침\n?              이 도움말 열기/닫기\nq, Ctrl-c      종료 (세션은 tmux에서 계속 실행)",
+        en: "j/k, ↑/↓       move selection\nEnter          attach (detach: Ctrl-b d)\nn              new session (name → agent → prompt)\nd / D          diff vs base (full / --stat)\nx              remove session (modal: y/f/N)\nJ/K, PgUp/PgDn scroll preview\n/              filter by name (Esc clears)\nr              refresh now\n?              toggle this help\nq, Ctrl-c      quit (sessions keep running in tmux)",
+        ko: "j/k, ↑/↓       세션 선택 이동\nEnter          접속 (분리: Ctrl-b d)\nn              새 세션 (이름 → 에이전트 → 지시문)\nd / D          base 대비 diff (전체 / --stat)\nx              세션 정리 (모달: y/f/N)\nJ/K, PgUp/PgDn 미리보기 스크롤\n/              이름 필터 (Esc 해제)\nr              즉시 새로고침\n?              이 도움말 열기/닫기\nq, Ctrl-c      종료 (세션은 tmux에서 계속 실행)",
     }
     tui_last_output(age: &str) => {
         en: "last output {age} ago",
@@ -240,6 +240,10 @@ messages! {
     tui_new_enter() => {
         en: "(Enter creates · empty = shell only · Esc cancel)",
         ko: "(Enter 생성 · 빈 값 = 셸만 · Esc 취소)",
+    }
+    tui_filter_hint() => {
+        en: "(Enter keep · Esc clear)",
+        ko: "(Enter 유지 · Esc 해제)",
     }
 }
 

@@ -1,3 +1,4 @@
+mod ansi;
 mod args;
 mod commands;
 mod msg;

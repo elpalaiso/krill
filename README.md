@@ -55,7 +55,7 @@ krill new review-login -a codex --from fix-login \
 |---|---|---|
 | M0 | 코어 CLI: new / ls / attach / diff / rm, `--from` 릴레이 | ✅ |
 | M0.5 | 코어 유닛/통합 테스트, 메시지 ko/en i18n | ✅ |
-| M1 | TUI 대시보드 (ratatui), 상태 휴리스틱 | 🔶 M1a+M1b (남음: 필터·색 미리보기) |
+| M1 | TUI 대시보드 (ratatui), 상태 휴리스틱 | ✅ |
 | M2 | `krill serve`: 웹 UI + Tailscale 원격 접속 | ⬜ |
 | M3 | Claude Code 훅 연동(NeedsYou 정확 감지), ntfy 푸시, merge/pr | ⬜ |
 | M4 | 릴리스 CI, Homebrew tap | ⬜ |
