@@ -43,6 +43,30 @@ pub fn new(
     message: Option<&str>,
     from: Option<&str>,
 ) -> Result<()> {
+    let meta = create_session(name, agent, repo, message, from)?;
+    println!("{BOLD}{}{RESET} {}", meta.name, m::session_started());
+    println!("  repo     {} ({})", meta.repo_name, meta.repo_path.display());
+    println!("  branch   {} (base: {})", meta.branch, meta.base);
+    println!("  worktree {}", meta.worktree.display());
+    println!(
+        "  agent    {}{}",
+        meta.agent,
+        if meta.cmd.is_empty() { m::shell_only() } else { String::new() }
+    );
+    println!();
+    println!("{}", m::attach_hint(&format!("{BOLD}krill attach {}{RESET}", meta.name)));
+    Ok(())
+}
+
+/// Branch + worktree + tmux session + agent, returning the saved meta.
+/// No terminal output — the CLI (`new`) and the TUI both wrap this.
+pub fn create_session(
+    name: &str,
+    agent: Option<&str>,
+    repo: Option<&str>,
+    message: Option<&str>,
+    from: Option<&str>,
+) -> Result<SessionMeta> {
     if !krill_core::valid_name(name) {
         bail!(m::invalid_session_name(name));
     }
@@ -137,15 +161,7 @@ pub fn new(
         return Err(e);
     }
     meta.save()?;
-
-    println!("{BOLD}{name}{RESET} {}", m::session_started());
-    println!("  repo     {} ({})", repo_ref.name, repo_ref.path.display());
-    println!("  branch   {branch} (base: {base})");
-    println!("  worktree {}", worktree.display());
-    println!("  agent    {agent_name}{}", if cmd.is_empty() { m::shell_only() } else { String::new() });
-    println!();
-    println!("{}", m::attach_hint(&format!("{BOLD}krill attach {name}{RESET}")));
-    Ok(())
+    Ok(meta)
 }
 
 pub fn ls() -> Result<()> {
@@ -228,21 +244,28 @@ pub fn diff(name: &str, repo: Option<&str>, stat: bool) -> Result<()> {
     if !meta.worktree.exists() {
         bail!(m::worktree_missing(&meta.worktree.display().to_string()));
     }
+    diff_worktree(&meta.worktree, &meta.base, stat, false)
+}
+
+/// Run `git diff` against base with inherited stdio (pager and colors
+/// intact). `hold_pager` pins LESS=R so the pager waits for `q` even on
+/// one-screen diffs — without it git's default LESS=FRX exits instantly
+/// and the resuming TUI would repaint over the diff before it can be
+/// read. The CLI passes false (print-and-exit is right there); the TUI
+/// passes true.
+pub fn diff_worktree(worktree: &std::path::Path, base: &str, stat: bool, hold_pager: bool) -> Result<()> {
     // Diff the working tree against base — includes uncommitted changes,
     // which agents frequently leave behind.
-    let mut args: Vec<String> = vec![
-        "-C".into(),
-        meta.worktree.display().to_string(),
-        "diff".into(),
-    ];
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(worktree).arg("diff");
     if stat {
-        args.push("--stat".into());
+        cmd.arg("--stat");
     }
-    args.push(meta.base.clone());
-    let status = Command::new("git")
-        .args(&args)
-        .status()
-        .context(m::git_exec_failed())?;
+    cmd.arg(base);
+    if hold_pager {
+        cmd.env("LESS", "R");
+    }
+    let status = cmd.status().context(m::git_exec_failed())?;
     if !status.success() {
         bail!(m::git_diff_exit(&status.to_string()));
     }
@@ -263,6 +286,19 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
         }
     }
 
+    let warning = remove_session(&meta, force)?;
+    if let Some(w) = warning {
+        eprintln!("{DIM}{w}{RESET}");
+        eprintln!("{DIM}{}{RESET}", m::rm_branch_hint(&meta.branch));
+    }
+    println!("{}", m::rm_done(&meta.name));
+    Ok(())
+}
+
+/// Kill tmux + remove worktree + delete branch + drop meta. Returns a
+/// warning line when the branch is kept (not merged). No terminal
+/// output — the CLI (`rm`) and the TUI both wrap this.
+pub fn remove_session(meta: &SessionMeta, force: bool) -> Result<Option<String>> {
     if tmux::has(&meta.tmux) {
         tmux::kill(&meta.tmux)?;
     }
@@ -272,13 +308,11 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
         }
     }
     let _ = git::run(&meta.repo_path, &["worktree", "prune"]);
-    if let Err(e) = git::branch_delete(&meta.repo_path, &meta.branch, force) {
-        eprintln!("{DIM}{}{RESET}", m::rm_branch_kept(&e.to_string()));
-        eprintln!("{DIM}{}{RESET}", m::rm_branch_hint(&meta.branch));
-    }
+    let warning = git::branch_delete(&meta.repo_path, &meta.branch, force)
+        .err()
+        .map(|e| m::rm_branch_kept(&e.to_string()));
     meta.delete()?;
-    println!("{}", m::rm_done(&meta.name));
-    Ok(())
+    Ok(warning)
 }
 
 #[cfg(test)]
