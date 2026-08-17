@@ -63,6 +63,16 @@ fn run() -> Result<()> {
             let o = args::parse(rest, &[("-b", "--bind"), ("-p", "--port")], &[])?;
             commands::serve(o.val("--bind"), o.val("--port"))
         }
+        "merge" => {
+            let o = args::parse(rest, &[("-r", "--repo")], &[("", "--squash")])?;
+            let name = o.pos.first().context(msg::name_required("merge"))?;
+            commands::merge(name, o.val("--repo"), o.flag("--squash"))
+        }
+        "pr" => {
+            let o = args::parse(rest, &[("-r", "--repo")], &[])?;
+            let name = o.pos.first().context(msg::name_required("pr"))?;
+            commands::pr(name, o.val("--repo"))
+        }
         "rm" => {
             let o = args::parse(rest, &[("-r", "--repo")], &[("-f", "--force")])?;
             let name = o.pos.first().context(msg::name_required("rm"))?;

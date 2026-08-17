@@ -30,9 +30,14 @@ worktree에 .claude/settings.local.json을 주입(current_exe 절대 경로,
 `state/<id>.kv`를 쓴다. 상태 판정: dead > (훅이 마지막 출력보다 새로우면
 needs-you/done) > 30초 휴리스틱 — 출력이 재개되면 자동으로 훅 상태를 벗어난다.
 Status 5종(needs-you ◆ / active ● / quiet ◌ / done ✓ / dead ✖)을 ls/TUI/웹이
-공유. 남은 M3b: ntfy 푸시(hook에서 curl 위임), M3c: merge/pr 커맨드.
+공유. M3b: `krill hook`이 config `[notify] ntfy_topic`으로 푸시(curl 위임,
+fire-and-forget — 훅이 네트워크 때문에 막히면 안 됨). M3c: `merge`(base
+체크아웃 상태에서만, dirty 세션 거부 — 단 주입된 .claude/는 dirty로 안 침,
+--squash는 스테이징만 하고 세션 유지, 성공 시 자동 정리) + `pr`(push 후
+gh 위임). remove_session은 krill이 주입한 untracked settings.local.json을
+먼저 치워 non-force worktree remove가 성립하게 한다. M3 완료.
 
-다음 마일스톤 순서: M3 마무리(M3b/c) → M4 릴리스 CI/brew → M5 듀엣(턴제
+다음 마일스톤 순서: M4 릴리스 CI/brew → M5 듀엣(턴제
 교차모델 리뷰, docs/DESIGN.md §12).
 
 ## 설계 원칙 (요약 — 상세는 DESIGN.md §4)

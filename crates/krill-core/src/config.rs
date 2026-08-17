@@ -46,6 +46,8 @@ pub struct Config {
     pub agents: BTreeMap<String, AgentCfg>,
     pub repos: BTreeMap<String, RepoCfg>,
     pub serve: ServeCfg,
+    /// `[notify] ntfy_topic` — bare topic ("krill-me-x8f2") or full URL.
+    pub ntfy_topic: Option<String>,
 }
 
 pub const DEFAULT_CONFIG_KO: &str = r#"# krill config
@@ -72,6 +74,9 @@ cmd = ""                  # 빈 cmd = 그냥 셸 (테스트용)
 # [repos.myapp]
 # path = "~/work/myapp"
 # base = "main"
+
+# [notify]
+# ntfy_topic = "krill-나만아는-랜덤접미사"   # needs-you/done 시 폰 푸시 (ntfy.sh)
 "#;
 
 pub const DEFAULT_CONFIG_EN: &str = r#"# krill config
@@ -98,6 +103,9 @@ cmd = ""                  # empty cmd = plain shell (for testing)
 # [repos.myapp]
 # path = "~/work/myapp"
 # base = "main"
+
+# [notify]
+# ntfy_topic = "krill-yours-x8f2"   # phone push on needs-you/done (ntfy.sh)
 "#;
 
 /// The default config template in the current language. Both variants
@@ -232,6 +240,11 @@ fn parse(raw: &str) -> Result<Config> {
                     _ => {}
                 }
             }
+            "notify" => {
+                if key == "ntfy_topic" && !value.is_empty() {
+                    config.ntfy_topic = Some(value);
+                }
+            }
             "serve" => match key {
                 "port" => {
                     config.serve.port = value
@@ -364,6 +377,14 @@ port = 7777
 
         assert!(parse("[serve]\nport = not-a-number\n").is_err());
         assert!(parse("[serve]\ntoken = \"\"\n").unwrap().serve.token.is_none());
+    }
+
+    #[test]
+    fn parses_notify_section() {
+        assert!(parse("").unwrap().ntfy_topic.is_none());
+        let c = parse("[notify]\nntfy_topic = \"krill-me-x8f2\"\n").unwrap();
+        assert_eq!(c.ntfy_topic.as_deref(), Some("krill-me-x8f2"));
+        assert!(parse("[notify]\nntfy_topic = \"\"\n").unwrap().ntfy_topic.is_none());
     }
 
     #[test]

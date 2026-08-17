@@ -322,6 +322,71 @@ pub fn serve(bind: Option<&str>, port: Option<&str>) -> Result<()> {
     crate::serve::run(&bind, port, cfg.token)
 }
 
+/// `krill merge <name> [--squash]` — merge the session branch into base
+/// (which must be checked out in the repo) and clean the session up.
+pub fn merge(name: &str, repo: Option<&str>, squash: bool) -> Result<()> {
+    let meta = session::find(name, repo)?;
+
+    // Uncommitted work can't be merged — make the user commit first.
+    // krill's own injected .claude/ hook settings don't count as work.
+    if meta.worktree.exists()
+        && is_dirty(&git::run(&meta.worktree, &["status", "--porcelain"])?)
+    {
+        bail!(m::merge_dirty(&meta.name));
+    }
+    // Stubborn-simple (§7 spirit): merge only when base is checked out,
+    // instead of silently switching the user's branches around.
+    let current = git::run(&meta.repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if current != meta.base {
+        bail!(m::merge_not_on_base(&meta.base));
+    }
+
+    if squash {
+        git::run(&meta.repo_path, &["merge", "--squash", &meta.branch])?;
+        println!("{}", m::merge_squashed(&meta.name, &meta.base));
+        // Branch survives --squash (nothing points at the commits yet);
+        // leave the session too, so the diff stays inspectable until
+        // the user commits and runs rm.
+        return Ok(());
+    }
+
+    git::run(&meta.repo_path, &["merge", "--no-edit", &meta.branch])?;
+    println!("{}", m::merge_done(&meta.name, &meta.base));
+    let warning = remove_session(&meta, false)?;
+    if let Some(w) = warning {
+        eprintln!("{DIM}{w}{RESET}");
+    }
+    println!("{}", m::rm_done(&meta.name));
+    Ok(())
+}
+
+/// Any porcelain entry that isn't krill's injected .claude/ settings.
+fn is_dirty(porcelain: &str) -> bool {
+    porcelain
+        .lines()
+        .any(|l| l.len() > 3 && !l[3..].trim_start().starts_with(".claude"))
+}
+
+/// `krill pr <name>` — push the branch and delegate to `gh pr create`
+/// (interactive, run inside the worktree). The session stays alive.
+pub fn pr(name: &str, repo: Option<&str>) -> Result<()> {
+    let meta = session::find(name, repo)?;
+    if !meta.worktree.exists() {
+        bail!(m::worktree_missing(&meta.worktree.display().to_string()));
+    }
+    git::run(&meta.worktree, &["push", "-u", "origin", &meta.branch])?;
+    println!("{}", m::pr_pushed(&meta.branch));
+    let status = Command::new("gh")
+        .args(["pr", "create", "--head", &meta.branch])
+        .current_dir(&meta.worktree)
+        .status()
+        .context(m::gh_failed())?;
+    if !status.success() {
+        bail!(m::gh_exit(&status.to_string()));
+    }
+    Ok(())
+}
+
 pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
     let meta = session::find(name, repo)?;
 
@@ -384,14 +449,41 @@ fn inject_claude_hooks(worktree: &std::path::Path, id: &str) -> Result<()> {
 
 /// `krill hook <state> -i <id>` — called by agent hooks, writes the
 /// state file that status() layers over the activity heuristic. The
-/// hook payload on stdin is drained and discarded (M3a).
+/// hook payload on stdin is drained and discarded (M3a). With a
+/// `[notify] ntfy_topic` configured it also fires a phone push (M3b) —
+/// straight from the hook, so notifications need no server either.
 pub fn hook(state: &str, id: &str) -> Result<()> {
     let Some(hs) = krill_core::session::HookState::parse(state) else {
         bail!(m::hook_usage());
     };
     let mut sink = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut sink);
-    session::write_hook_state(id, hs)
+    session::write_hook_state(id, hs)?;
+
+    if let Some(topic) = Config::load().ok().and_then(|c| c.ntfy_topic) {
+        let body = match hs {
+            krill_core::session::HookState::NeedsYou => m::ntfy_needs_you(id),
+            krill_core::session::HookState::Done => m::ntfy_done(id),
+        };
+        // Best-effort, delegated to curl (principle 1), fire-and-forget
+        // — a hook must never block or fail the agent on network issues.
+        let _ = Command::new("curl")
+            .args(["-fsS", "-m", "5", "-H", "Title: krill", "-d", &body, &ntfy_url(&topic)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    Ok(())
+}
+
+/// Bare topics go to ntfy.sh; anything with a scheme is used verbatim
+/// (self-hosted ntfy, or any endpoint that accepts a plain POST).
+fn ntfy_url(topic: &str) -> String {
+    if topic.contains("://") {
+        topic.to_string()
+    } else {
+        format!("https://ntfy.sh/{topic}")
+    }
 }
 
 /// Kill tmux + remove worktree + delete branch + drop meta. Returns a
@@ -402,6 +494,18 @@ pub fn remove_session(meta: &SessionMeta, force: bool) -> Result<Option<String>>
         tmux::kill(&meta.tmux)?;
     }
     if meta.worktree.exists() {
+        // krill's own injected hook settings are untracked and would
+        // make a clean worktree look dirty to `git worktree remove` —
+        // clean them up first (only when untracked, i.e. ours).
+        let injected = meta.worktree.join(".claude").join("settings.local.json");
+        if injected.exists()
+            && git::run(&meta.worktree, &["ls-files", ".claude/settings.local.json"])
+                .map(|out| out.is_empty())
+                .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&injected);
+            let _ = std::fs::remove_dir(meta.worktree.join(".claude"));
+        }
         if let Err(e) = git::worktree_remove(&meta.repo_path, &meta.worktree, force) {
             bail!(m::rm_worktree_failed(&e.to_string(), &meta.name));
         }
@@ -423,6 +527,22 @@ mod tests {
         assert_eq!(tmux_safe("krill_web_fix-1"), "krill_web_fix-1");
         assert_eq!(tmux_safe("a.b:c d"), "a-b-c-d");
         assert_eq!(tmux_safe("한글x"), "--x");
+    }
+
+    #[test]
+    fn is_dirty_ignores_injected_claude_settings() {
+        assert!(!super::is_dirty(""));
+        assert!(!super::is_dirty("?? .claude/\n"));
+        assert!(!super::is_dirty("?? .claude/settings.local.json\n"));
+        assert!(super::is_dirty(" M src/main.rs\n"));
+        assert!(super::is_dirty("?? .claude/\n?? new-file.rs\n"));
+    }
+
+    #[test]
+    fn ntfy_url_prepends_ntfy_sh_for_bare_topics() {
+        assert_eq!(super::ntfy_url("krill-x"), "https://ntfy.sh/krill-x");
+        assert_eq!(super::ntfy_url("http://127.0.0.1:9/t"), "http://127.0.0.1:9/t");
+        assert_eq!(super::ntfy_url("https://my.ntfy/t"), "https://my.ntfy/t");
     }
 
     #[test]
