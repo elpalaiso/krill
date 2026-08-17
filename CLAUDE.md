@@ -16,7 +16,12 @@ dirty 경고·y/f/N) + M1c 폴리시(/ 이름 필터, 색 미리보기 — captu
 ansi.rs의 SGR 파서로 렌더). M1 완료. commands.rs의 create_session/remove_session은
 무출력 코어라 CLI와 TUI가 공유한다.
 
-다음 마일스톤 순서: M2 `krill serve`(웹 UI + Tailscale 원격) →
+M2a 진행: `krill serve` 읽기 전용 웹 UI(serve.rs + web/index.html 내장,
+카드 목록·미리보기 API, 토큰 인증 — §7 규칙: non-loopback 바인드는 토큰 필수,
+설계는 DESIGN.md §8.2). tokio/axum/serde는 바이너리 크레이트에만. 남은 M2b:
+WebSocket + xterm.js 입력, M2c: 퀵 리플라이·diff 뷰.
+
+다음 마일스톤 순서: M2 마무리(M2b/c) →
 M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → M5 듀엣(턴제
 교차모델 리뷰, docs/DESIGN.md §12).
 
@@ -29,7 +34,8 @@ M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → 
 3. 데몬을 강요하지 않는다: TUI만 쓰면 상주 프로세스 0. 상태는 tmux + 메타파일에서
    매번 재구성한다. serve가 죽어도 에이전트 세션은 산다.
 4. 의존성은 마일스톤이 요구할 때만 추가한다 (M1: ratatui/crossterm/clap 허용,
-   M2: tokio/axum/rust-embed 허용). "가벼움"이 이 프로젝트의 정체성이다.
+   M2: tokio/axum/serde/rust-embed 허용 — 모두 바이너리 크레이트에만, krill-core는
+   순수 std 유지). "가벼움"이 이 프로젝트의 정체성이다.
 
 ## 구조
 
