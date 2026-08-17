@@ -37,8 +37,14 @@ fire-and-forget — 훅이 네트워크 때문에 막히면 안 됨). M3c: `merg
 gh 위임). remove_session은 krill이 주입한 untracked settings.local.json을
 먼저 치워 non-force worktree remove가 성립하게 한다. M3 완료.
 
-다음 마일스톤 순서: M4 릴리스 CI/brew → M5 듀엣(턴제
-교차모델 리뷰, docs/DESIGN.md §12).
+M4 완료: CI(.github/workflows/ci.yml — push/PR마다 빌드+테스트), 릴리스
+(release.yml — v* 태그 시 4개 플랫폼 네이티브 빌드 → tar.gz+sha256 릴리스
+첨부, 크로스컴파일 없이 arm 러너 사용), Homebrew(Formula/krill.rb — 메인
+리포가 곧 tap, 첫 태그 후 sha256 채우기). 릴리스 바이너리 실측 2.1MB
+(xterm.js 내장 + tokio/axum/ratatui 포함 — 목표 10MB의 1/5).
+릴리스 절차: 버전 올리고 `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+다음 마일스톤: M5 듀엣(턴제 교차모델 리뷰, docs/DESIGN.md §12).
 
 ## 설계 원칙 (요약 — 상세는 DESIGN.md §4)
 
