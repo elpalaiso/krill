@@ -1,9 +1,11 @@
 mod args;
 mod commands;
 mod msg;
+mod ui;
 
 use krill_core::bail;
 use krill_core::error::{Context, Result};
+use std::io::IsTerminal;
 
 fn main() {
     if let Err(e) = run() {
@@ -18,6 +20,11 @@ fn run() -> Result<()> {
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match argv.split_first() {
+        // No args: TUI dashboard on a real terminal, `ls` otherwise
+        // (pipes, scripts).
+        None if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() => {
+            return ui::run()
+        }
         None => return commands::ls(),
         Some((c, r)) => (c.as_str(), r),
     };

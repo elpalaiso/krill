@@ -82,6 +82,32 @@ pub fn attached_count(name: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// Current visible pane content as plain text (without `-e` tmux strips
+/// ANSI codes, so no parsing is needed — design doc §8.1).
+pub fn capture_pane(name: &str) -> Result<String> {
+    ok(&["capture-pane", "-p", "-t", &pane_target(name)])
+}
+
+/// Attach as a blocking child process, returning when the client
+/// detaches — for the TUI, which must resume afterwards (`attach_exec`
+/// replaces the process and never returns).
+pub fn attach_wait(name: &str) -> Result<()> {
+    let t = target(name);
+    let args: [&str; 3] = if std::env::var_os("TMUX").is_some() {
+        ["switch-client", "-t", &t]
+    } else {
+        ["attach-session", "-t", &t]
+    };
+    let status = Command::new("tmux")
+        .args(args)
+        .status()
+        .context(msg::tmux_not_found())?;
+    if !status.success() {
+        bail!(msg::tmux_cmd_failed("attach", &status.to_string()));
+    }
+    Ok(())
+}
+
 /// Replace this process with `tmux attach` (or `switch-client` when
 /// already inside tmux). Only returns on failure.
 pub fn attach_exec(name: &str) -> Result<()> {
