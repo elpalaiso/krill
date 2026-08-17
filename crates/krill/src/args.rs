@@ -1,0 +1,61 @@
+//! Tiny flag parser (M0 has no clap). Supports `-a val` / `--agent val`
+//! style; `--flag=val` is not supported yet.
+
+use krill_core::bail;
+use krill_core::error::Result;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub struct Opts {
+    pub pos: Vec<String>,
+    vals: BTreeMap<&'static str, String>,
+    bools: BTreeSet<&'static str>,
+}
+
+impl Opts {
+    pub fn val(&self, long: &str) -> Option<&str> {
+        self.vals.get(long).map(|s| s.as_str())
+    }
+    pub fn flag(&self, long: &str) -> bool {
+        self.bools.contains(long)
+    }
+}
+
+/// `val_specs` / `bool_specs`: (short, long) pairs; short may be "".
+pub fn parse(
+    args: &[String],
+    val_specs: &[(&'static str, &'static str)],
+    bool_specs: &[(&'static str, &'static str)],
+) -> Result<Opts> {
+    let mut opts = Opts {
+        pos: Vec::new(),
+        vals: BTreeMap::new(),
+        bools: BTreeSet::new(),
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg.starts_with('-') && arg.len() > 1 {
+            if let Some((_, long)) = val_specs
+                .iter()
+                .find(|(s, l)| (!s.is_empty() && *s == arg) || *l == arg)
+            {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    bail!("{arg} 옵션에 값이 필요합니다");
+                };
+                opts.vals.insert(long, value.clone());
+            } else if let Some((_, long)) = bool_specs
+                .iter()
+                .find(|(s, l)| (!s.is_empty() && *s == arg) || *l == arg)
+            {
+                opts.bools.insert(long);
+            } else {
+                bail!("알 수 없는 옵션: {arg} (도움말: krill --help)");
+            }
+        } else {
+            opts.pos.push(arg.to_string());
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
