@@ -8,7 +8,9 @@ Orca/Xirp의 경량 대안. **전체 설계는 docs/DESIGN.md — 작업 전에 
 M0 완료: `new / ls / attach / diff / rm` + `--from` 릴레이 핸드오프. 순수 std로 외부
 크레이트 0개인데 이것은 의도된 설계다(릴리스 바이너리 515KB). 실기기 검증 완료.
 이후 추가: 코어 유닛 테스트 + 실제 git 통합 테스트(`cargo test`), CLI 메시지
-ko/en i18n(`messages!` 카탈로그, 로케일 자동 감지).
+ko/en i18n(`messages!` 카탈로그, 로케일 자동 감지), M1a TUI(읽기 전용 대시보드 —
+목록·라이브 미리보기·attach·도움말, ratatui는 바이너리 크레이트에만. 인자 없이
+`krill` 실행 시 TTY면 TUI, 아니면 ls). M1b(n/d/x 액션)가 다음 작업.
 
 다음 마일스톤 순서: M1 TUI(ratatui) → M2 `krill serve`(웹 UI + Tailscale 원격) →
 M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → M5 듀엣(턴제
@@ -29,7 +31,8 @@ M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → 
 
 - `crates/krill-core` — 라이브러리: config, git(worktree), tmux, session, kv, error.
   UI를 모른다. TUI/웹은 이 위의 얇은 뷰여야 한다.
-- `crates/krill` — 바이너리: main(디스패치), args(플래그 파서), commands(구현).
+- `crates/krill` — 바이너리: main(디스패치), args(플래그 파서), commands(구현),
+  ui(TUI — 설계는 docs/DESIGN.md §8.1, TUI는 attach 시 일시중단 후 복귀하는 허브).
 - 데이터: `~/.local/share/krill/{sessions,logs,worktrees}`, 설정: `~/.config/krill/config.toml`.
 
 ## 빌드와 테스트

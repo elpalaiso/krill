@@ -19,7 +19,7 @@ krill — tiny orchestrator for AI coding agents (tmux + git worktrees)
 krill이 꺼져 있어도 에이전트는 계속 일합니다.
 
 사용법:
-  krill                               세션 목록 (= krill ls)
+  krill                               TUI 대시보드 (터미널이 아니면 = krill ls)
   krill init                          설정 파일 생성 (~/.config/krill/config.toml)
   krill new <이름> [옵션]             새 세션: 브랜치 + worktree + tmux + 에이전트
       -a, --agent <이름>              에이전트 (config의 [agents.*])
@@ -45,7 +45,7 @@ Runs each agent in parallel, isolated in its own git worktree. Sessions
 live in tmux, so agents keep working even while krill is closed.
 
 usage:
-  krill                               list sessions (= krill ls)
+  krill                               TUI dashboard (non-TTY: = krill ls)
   krill init                          write the config file (~/.config/krill/config.toml)
   krill new <name> [options]          new session: branch + worktree + tmux + agent
       -a, --agent <name>              agent ([agents.*] in the config)
@@ -180,6 +180,26 @@ messages! {
     rm_done(name: &str) => {
         en: "cleaned up: {name}",
         ko: "정리 완료: {name}",
+    }
+    tui_hint() => {
+        en: "Enter attach · j/k move · J/K scroll · r refresh · ? help · q quit",
+        ko: "Enter 접속 · j/k 이동 · J/K 스크롤 · r 새로고침 · ? 도움말 · q 종료",
+    }
+    tui_help_title() => {
+        en: "keys",
+        ko: "키",
+    }
+    tui_help_body() => {
+        en: "j/k, ↑/↓       move selection\nEnter          attach (detach: Ctrl-b d)\nJ/K, PgUp/PgDn scroll preview\nr              refresh now\n?              toggle this help\nq, Ctrl-c      quit (sessions keep running in tmux)",
+        ko: "j/k, ↑/↓       세션 선택 이동\nEnter          접속 (분리: Ctrl-b d)\nJ/K, PgUp/PgDn 미리보기 스크롤\nr              즉시 새로고침\n?              이 도움말 열기/닫기\nq, Ctrl-c      종료 (세션은 tmux에서 계속 실행)",
+    }
+    tui_last_output(age: &str) => {
+        en: "last output {age} ago",
+        ko: "마지막 출력 {age} 전",
+    }
+    tui_no_output() => {
+        en: "(no output yet)",
+        ko: "(아직 출력이 없습니다)",
     }
 }
 

@@ -7,3 +7,4 @@ description = "tiny orchestrator for AI coding agents — tmux + git worktrees"
 
 [dependencies]
 krill-core = { path = "../krill-core" }
+ratatui = "0.29"
