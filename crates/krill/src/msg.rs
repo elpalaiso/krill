@@ -28,6 +28,8 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
           --from <세션>               다른 세션의 브랜치에서 시작 (릴레이 핸드오프)
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
+  krill merge <이름> [--squash]       base에 머지 후 세션 정리 (base 체크아웃 상태에서)
+  krill pr <이름>                     브랜치 푸시 + gh pr create
   krill rm <이름> [-f|--force]        세션 · worktree · 브랜치 정리
   krill serve [-b <주소>|tailscale] [-p <포트>]  웹 UI (기본 127.0.0.1:7777)
   krill hook <상태> -i <세션ID>       (내부용) 에이전트 훅이 상태를 보고
@@ -56,6 +58,8 @@ usage:
           --from <session>            branch off another session's work (relay handoff)
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
+  krill merge <name> [--squash]       merge into base + clean up (run with base checked out)
+  krill pr <name>                     push the branch + gh pr create
   krill rm <name> [-f|--force]        remove session · worktree · branch
   krill serve [-b <addr>|tailscale] [-p <port>]  web UI (default 127.0.0.1:7777)
   krill hook <state> -i <session-id>  (internal) agent hooks report state
@@ -284,6 +288,42 @@ messages! {
     hook_settings_exists(path: &str) => {
         en: "keeping the existing hook settings: {path}",
         ko: "기존 훅 설정을 유지합니다: {path}",
+    }
+    ntfy_needs_you(id: &str) => {
+        en: "{id} needs you",
+        ko: "{id} 승인 대기 중",
+    }
+    ntfy_done(id: &str) => {
+        en: "{id} done",
+        ko: "{id} 작업 완료",
+    }
+    merge_dirty(name: &str) => {
+        en: "session '{name}' has uncommitted changes — commit them in the session first (krill attach {name}).",
+        ko: "'{name}' 세션에 커밋 안 된 변경이 있습니다 — 세션에서 먼저 커밋하세요 (krill attach {name}).",
+    }
+    merge_not_on_base(base: &str) => {
+        en: "the repo is not on the base branch — check out {base} first.",
+        ko: "리포가 base 브랜치에 있지 않습니다 — 먼저 {base}를 체크아웃하세요.",
+    }
+    merge_done(name: &str, base: &str) => {
+        en: "merged '{name}' into {base}.",
+        ko: "'{name}'을(를) {base}에 머지했습니다.",
+    }
+    merge_squashed(name: &str, base: &str) => {
+        en: "squashed '{name}' into the {base} index — review and commit it.",
+        ko: "'{name}'을(를) {base}에 squash 스테이징했습니다 — 확인 후 커밋하세요.",
+    }
+    pr_pushed(branch: &str) => {
+        en: "pushed {branch} — opening a PR with gh…",
+        ko: "{branch} 푸시 완료 — gh로 PR을 엽니다…",
+    }
+    gh_failed() => {
+        en: "failed to run gh (is the GitHub CLI installed and authenticated?)",
+        ko: "gh를 실행할 수 없습니다 (GitHub CLI가 설치·로그인돼 있나요?)",
+    }
+    gh_exit(status: &str) => {
+        en: "gh pr create exit status: {status}",
+        ko: "gh pr create 종료 코드: {status}",
     }
 }
 
