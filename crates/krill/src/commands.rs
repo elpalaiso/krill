@@ -3,6 +3,7 @@ use krill_core::bail;
 use krill_core::config::Config;
 use krill_core::error::{Context, Result};
 use krill_core::git;
+use krill_core::duet::{self, Action, Awaiting, DuetRef, DuetRole, DuetState, Event};
 use krill_core::session::{self, FlowNext, FlowRef, SessionMeta, Status};
 use krill_core::tmux;
 use std::io::Write as _;
@@ -110,6 +111,136 @@ fn flow_names(config: &Config) -> String {
     }
 }
 
+/// `krill duet <name> -m "task"` — turn-based worker/reviewer ping-pong
+/// over one shared worktree (design §12.1 decision 4). The worker is a
+/// normal session; the reviewer is a second tmux session in the same
+/// worktree, and `krill hook done` referees the turns.
+pub fn duet(
+    name: &str,
+    agent: Option<&str>,
+    reviewer: Option<&str>,
+    repo: Option<&str>,
+    message: Option<&str>,
+    gate: Option<&str>,
+    max_rounds: Option<&str>,
+) -> Result<()> {
+    let Some(goal) = message else {
+        bail!(m::duet_goal_required());
+    };
+    let config = Config::load()?;
+    let max_rounds: u32 = match max_rounds {
+        Some(v) => match v.parse().ok().filter(|n: &u32| *n >= 1) {
+            Some(n) => n,
+            None => bail!(m::duet_bad_rounds(v)),
+        },
+        None => config.duet.max_rounds.unwrap_or(2),
+    };
+    let reviewer = reviewer
+        .map(str::to_string)
+        .or_else(|| config.duet.reviewer.clone());
+
+    // Hookless agents never fire the Done that drives the referee.
+    for side in [agent, reviewer.as_deref()] {
+        if let Ok((agent_name, cfg)) = config.resolve_agent(side) {
+            if cfg.hooks.is_none() {
+                eprintln!("{}", m::duet_no_hooks_warn(&agent_name));
+            }
+        }
+    }
+
+    // Worker first (normal session — worktree, branch, goal prompt).
+    let mut worker = create_session_full(name, agent, repo, Some(goal), None, None, None)?;
+    let rev_name = format!("{name}-rev");
+
+    let spawn_reviewer = || -> Result<SessionMeta> {
+        let (rev_agent, rev_cfg) = config.resolve_agent(reviewer.as_deref())?;
+        if session::load_all()?
+            .iter()
+            .any(|s| s.name == rev_name && s.repo_name == worker.repo_name)
+        {
+            bail!(m::session_exists(&rev_name, &worker.repo_name));
+        }
+        let rev_id = format!("{}--{}", worker.repo_name, rev_name);
+        // Launched bare (no prompt): instructions arrive per round via
+        // send-keys from the referee.
+        let cmd = rev_cfg.cmd.replace("{prompt}", "").trim().to_string();
+        let cmd = if rev_cfg.hooks.is_some() && !cmd.is_empty() {
+            format!("KRILL_SESSION_ID={} {cmd}", krill_core::shell_quote(&rev_id))
+        } else {
+            cmd
+        };
+        let tmux_name = tmux_safe(&format!("krill_{}_{}", worker.repo_name, rev_name));
+        let meta = SessionMeta {
+            name: rev_name.clone(),
+            repo_name: worker.repo_name.clone(),
+            repo_path: worker.repo_path.clone(),
+            base: worker.base.clone(),
+            branch: worker.branch.clone(),
+            worktree: worker.worktree.clone(), // shared — see §12.1
+            agent: rev_agent,
+            cmd: cmd.clone(),
+            tmux: tmux_name.clone(),
+            created_unix: krill_core::now_unix(),
+            flow: None,
+            duet: Some(DuetRef { role: DuetRole::Reviewer, peer: worker.name.clone() }),
+        };
+        if tmux::has(&tmux_name) {
+            bail!(m::tmux_name_taken(&tmux_name));
+        }
+        tmux::new_session(&tmux_name, &meta.worktree)?;
+        let spawn = || -> Result<()> {
+            let log = meta.log_path()?;
+            if let Some(dir) = log.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            tmux::pipe_to_log(&tmux_name, &log)?;
+            if !cmd.is_empty() {
+                tmux::send_line(&tmux_name, &cmd)?;
+            }
+            Ok(())
+        };
+        if let Err(e) = spawn() {
+            let _ = tmux::kill(&tmux_name);
+            return Err(e);
+        }
+        meta.save()?;
+        Ok(meta)
+    };
+
+    let rev_meta = match spawn_reviewer() {
+        Ok(m) => m,
+        Err(e) => {
+            // No half-made duets: the worker goes too.
+            let _ = remove_session(&worker, true);
+            return Err(e);
+        }
+    };
+
+    worker.duet = Some(DuetRef { role: DuetRole::Worker, peer: rev_name.clone() });
+    worker.save()?;
+
+    // Gate priority: CLI flag > repo gate > [duet] gate > none.
+    let gate = gate
+        .map(str::to_string)
+        .or_else(|| config.repos.get(&worker.repo_name).and_then(|r| r.gate.clone()))
+        .or_else(|| config.duet.gate.clone())
+        .unwrap_or_default();
+    DuetState::new(max_rounds, &gate, goal).save(&worker.id())?;
+
+    println!("{BOLD}{}{RESET} {}", worker.name, m::duet_started());
+    println!("  repo     {} ({})", worker.repo_name, worker.repo_path.display());
+    println!("  branch   {} (base: {})", worker.branch, worker.base);
+    println!("  worktree {}", worker.worktree.display());
+    println!("  worker   {}  ·  reviewer {} ({})", worker.agent, rev_meta.agent, rev_meta.name);
+    println!(
+        "  gate     {}  ·  max rounds {max_rounds}",
+        if gate.is_empty() { m::duet_no_gate() } else { gate.clone() }
+    );
+    println!();
+    println!("{}", m::attach_hint(&format!("{BOLD}krill attach {}{RESET}", worker.name)));
+    Ok(())
+}
+
 /// Branch + worktree + tmux session + agent, returning the saved meta.
 /// No terminal output — the CLI (`new`) and the TUI both wrap this.
 pub fn create_session(
@@ -203,6 +334,13 @@ fn create_session_full(
         }
         None => agent_cfg.cmd.replace("{prompt}", "").trim().to_string(),
     };
+    // Hooked agents carry their session id in the environment so the
+    // shared settings.local.json reports the right session (§12.1).
+    let cmd = if agent_cfg.hooks.is_some() && !cmd.is_empty() {
+        format!("KRILL_SESSION_ID={} {cmd}", krill_core::shell_quote(&session_id))
+    } else {
+        cmd
+    };
 
     let tmux_name = tmux_safe(&format!("krill_{}_{}", repo_ref.name, name));
     let meta = SessionMeta {
@@ -217,6 +355,7 @@ fn create_session_full(
         tmux: tmux_name.clone(),
         created_unix: krill_core::now_unix(),
         flow,
+        duet: None,
     };
 
     let spawn = || -> Result<()> {
@@ -294,6 +433,7 @@ pub fn ls() -> Result<()> {
                 .flow
                 .as_ref()
                 .map(|f| format!("{}:{}", f.flow, f.stage))
+                .or_else(|| m.duet.as_ref().map(|d| format!("duet:{}", d.role.as_str())))
                 .unwrap_or_else(|| "-".into()),
             state: if attached { format!("{state}+⌨") } else { state },
             last,
@@ -408,10 +548,21 @@ pub fn serve(bind: Option<&str>, port: Option<&str>) -> Result<()> {
 pub fn merge(name: &str, repo: Option<&str>, squash: bool) -> Result<()> {
     let meta = session::find(name, repo)?;
 
+    // A duet is merged through its worker — the reviewer shares the
+    // same branch, but its removal semantics would only clean half.
+    if let Some(d) = &meta.duet {
+        if d.role == DuetRole::Reviewer {
+            bail!(m::merge_on_reviewer(&d.peer));
+        }
+    }
+
     // Uncommitted work can't be merged — make the user commit first.
     // krill's own injected .claude/ hook settings don't count as work.
     if meta.worktree.exists()
-        && is_dirty(&git::run(&meta.worktree, &["status", "--porcelain"])?)
+        && is_dirty(
+            &git::run(&meta.worktree, &["status", "--porcelain"])?,
+            meta.duet.is_some(),
+        )
     {
         bail!(m::merge_dirty(&meta.name));
     }
@@ -441,11 +592,23 @@ pub fn merge(name: &str, repo: Option<&str>, squash: bool) -> Result<()> {
     Ok(())
 }
 
-/// Any porcelain entry that isn't krill's injected .claude/ settings.
-fn is_dirty(porcelain: &str) -> bool {
-    porcelain
-        .lines()
-        .any(|l| l.len() > 3 && !l[3..].trim_start().starts_with(".claude"))
+/// Any porcelain entry that isn't krill's injected .claude/ settings —
+/// nor, for duet sessions, the referee's REVIEW.md/GATE.md protocol
+/// files (they're krill's noise, not the agent's work).
+fn is_dirty(porcelain: &str, ignore_duet_files: bool) -> bool {
+    porcelain.lines().any(|l| {
+        if l.len() <= 3 {
+            return false;
+        }
+        let path = l[3..].trim_start();
+        if path.starts_with(".claude") {
+            return false;
+        }
+        if ignore_duet_files && (path == "REVIEW.md" || path == "GATE.md") {
+            return false;
+        }
+        true
+    })
 }
 
 /// `krill pr <name>` — push the branch and delegate to `gh pr create`
@@ -494,7 +657,11 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
 /// Claude Code settings.local.json with command hooks that report
 /// session state back to krill (design §6.1 — file-based, no server).
 fn hook_settings_json(id: &str, exe: &str) -> String {
-    let cmd = |state: &str| format!("{exe} hook {state} -i {id}");
+    // `${KRILL_SESSION_ID:-…}`: krill-launched agents carry their own id
+    // in the environment (two duet sessions share one worktree and thus
+    // one settings file — design §12.1); a manually launched agent falls
+    // back to the literal id this file was injected with.
+    let cmd = |state: &str| format!("{exe} hook {state} -i \"${{KRILL_SESSION_ID:-{id}}}\"");
     serde_json::json!({
         "hooks": {
             "Notification": [
@@ -537,33 +704,180 @@ pub fn hook(state: &str, id: &str) -> Result<()> {
     let Some(hs) = krill_core::session::HookState::parse(state) else {
         bail!(m::hook_usage());
     };
+    // An empty id means the ${KRILL_SESSION_ID:-…} expansion had nothing
+    // to offer (edge: hand-edited settings) — a silent no-op, never an
+    // agent-facing failure.
+    if id.is_empty() {
+        return Ok(());
+    }
     let mut sink = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut sink);
     session::write_hook_state(id, hs)?;
 
     let config = Config::load().ok();
 
-    // Flow chain (M5a): Done on a flow-member session spawns the next
-    // stage. The chain result replaces the generic ntfy body.
-    let chain_note = match (&config, hs) {
-        (Some(cfg), krill_core::session::HookState::Done) => advance_flow(cfg, id),
+    // Flow chain (M5a) and duet referee (M5b): Done may advance a chain
+    // or hand the duet turn over. A session is in at most one of the
+    // two, and the outcome replaces the generic ntfy body.
+    let note = match (&config, hs) {
+        (Some(cfg), krill_core::session::HookState::Done) => {
+            advance_flow(cfg, id).or_else(|| advance_duet(id))
+        }
         _ => None,
     };
 
     if let Some(topic) = config.and_then(|c| c.ntfy_topic) {
-        let body = chain_note.unwrap_or_else(|| match hs {
+        let body = note.unwrap_or_else(|| match hs {
             krill_core::session::HookState::NeedsYou => m::ntfy_needs_you(id),
             krill_core::session::HookState::Done => m::ntfy_done(id),
         });
-        // Best-effort, delegated to curl (principle 1), fire-and-forget
-        // — a hook must never block or fail the agent on network issues.
-        let _ = Command::new("curl")
-            .args(["-fsS", "-m", "5", "-H", "Title: krill", "-d", &body, &ntfy_url(&topic)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        ntfy_push(&topic, &body);
     }
     Ok(())
+}
+
+/// Best-effort push, delegated to curl (principle 1), fire-and-forget —
+/// a hook must never block or fail the agent on network issues.
+fn ntfy_push(topic: &str, body: &str) {
+    let _ = Command::new("curl")
+        .args(["-fsS", "-m", "5", "-H", "Title: krill", "-d", body, &ntfy_url(topic)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// The duet referee (M5b): map this session's Done to an Event, run the
+/// pure `duet::step`, then execute the decided Action (send-keys /
+/// detached gate / ntfy). Out-of-turn Stops fall through to None.
+fn advance_duet(id: &str) -> Option<String> {
+    let meta = session::find_by_id(id).ok()?;
+    let dref = meta.duet.clone()?;
+    let (worker, reviewer) = match dref.role {
+        DuetRole::Worker => {
+            let rev = session::find(&dref.peer, Some(&meta.repo_name)).ok()?;
+            (meta, rev)
+        }
+        DuetRole::Reviewer => {
+            let w = session::find(&dref.peer, Some(&meta.repo_name)).ok()?;
+            (w, meta)
+        }
+    };
+    let review_path = worker.worktree.join("REVIEW.md");
+    let event = match dref.role {
+        DuetRole::Worker => Event::WorkerDone,
+        DuetRole::Reviewer => {
+            let review = std::fs::read_to_string(&review_path).ok();
+            Event::ReviewerDone(duet::parse_verdict(review.as_deref()))
+        }
+    };
+    let worker_id = worker.id();
+    let state = DuetState::load(&worker_id).ok()?;
+    let (next, action) = duet::step(&state, event);
+    let action = action?;
+    next.save(&worker_id).ok()?;
+
+    match action {
+        Action::PingReviewer => {
+            // A stale verdict from the previous round must not survive
+            // into this one (§12.1 file lifecycle).
+            let _ = std::fs::remove_file(&review_path);
+            let _ = std::fs::remove_file(worker.worktree.join("GATE.md"));
+            let _ = tmux::send_line(&reviewer.tmux, &m::duet_review_instruction(&next.goal));
+            None
+        }
+        Action::PingWorkerReview => {
+            let _ = tmux::send_line(&worker.tmux, &m::duet_fix_instruction(next.round, next.max_rounds));
+            None
+        }
+        Action::ReinstructReviewer => {
+            let _ = tmux::send_line(&reviewer.tmux, &m::duet_review_missing());
+            None
+        }
+        Action::RunGate => {
+            // LGTM is consumed — REVIEW.md must not pollute gate/merge.
+            let _ = std::fs::remove_file(&review_path);
+            // The gate (e.g. cargo test) is slow: run it in a detached
+            // child so the reviewer's Stop hook returns instantly.
+            let exe = std::env::current_exe().unwrap_or_else(|_| "krill".into());
+            let _ = Command::new(exe)
+                .args(["duet-gate", "-i", &worker_id])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            None
+        }
+        Action::Complete => {
+            let _ = std::fs::remove_file(&review_path);
+            Some(m::ntfy_duet_done(&worker.name))
+        }
+        Action::Stall => {
+            let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
+            Some(m::ntfy_duet_stalled(&worker.name, next.max_rounds))
+        }
+        // Only the gate child can produce this event's actions.
+        Action::PingWorkerGate => None,
+    }
+}
+
+/// `krill duet-gate -i <worker-id>` (internal) — the detached gate run.
+/// Executes the gate command in the worktree, then feeds the result back
+/// through `duet::step`.
+pub fn duet_gate(worker_id: &str) -> Result<()> {
+    let worker = session::find_by_id(worker_id)?;
+    let state = DuetState::load(worker_id)?;
+    if state.awaiting != Awaiting::Gate {
+        return Ok(()); // late or duplicate — ignore
+    }
+    let out = Command::new("sh")
+        .args(["-c", &state.gate])
+        .current_dir(&worker.worktree)
+        .output()
+        .context(m::duet_gate_run_failed(&state.gate))?;
+    let pass = out.status.success();
+    if !pass {
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let body = format!(
+            "{}\n\n```\n{}\n```\n",
+            m::gate_md_header(&state.gate),
+            tail_chars(&text, 4000)
+        );
+        let _ = std::fs::write(worker.worktree.join("GATE.md"), body);
+    }
+    let (next, action) = duet::step(&state, Event::GateFinished { pass });
+    let Some(action) = action else { return Ok(()) };
+    next.save(worker_id)?;
+    let note = match action {
+        Action::Complete => Some(m::ntfy_duet_done(&worker.name)),
+        Action::PingWorkerGate => {
+            let _ = tmux::send_line(&worker.tmux, &m::duet_gate_fix_instruction(next.round, next.max_rounds));
+            None
+        }
+        Action::Stall => {
+            let _ = session::write_hook_state(worker_id, krill_core::session::HookState::NeedsYou);
+            Some(m::ntfy_duet_stalled(&worker.name, next.max_rounds))
+        }
+        _ => None,
+    };
+    if let (Some(topic), Some(body)) =
+        (Config::load().ok().and_then(|c| c.ntfy_topic), note)
+    {
+        ntfy_push(&topic, &body);
+    }
+    Ok(())
+}
+
+/// Last `max` characters, cut on a char boundary (like serve's diff cap).
+fn tail_chars(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut start = s.len() - max;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }
 
 /// Advance a flow chain after a Done hook. Never fails the hook: spawn
@@ -622,10 +936,43 @@ fn ntfy_url(topic: &str) -> String {
 /// warning line when the branch is kept (not merged). No terminal
 /// output — the CLI (`rm`) and the TUI both wrap this.
 pub fn remove_session(meta: &SessionMeta, force: bool) -> Result<Option<String>> {
+    // Reviewer half of a duet: only its tmux + meta go — the worktree
+    // and branch belong to the worker.
+    if matches!(&meta.duet, Some(d) if d.role == DuetRole::Reviewer) {
+        if tmux::has(&meta.tmux) {
+            tmux::kill(&meta.tmux)?;
+        }
+        meta.delete()?;
+        return Ok(None);
+    }
+    // Worker half: the duet is one unit — take the reviewer down too.
+    if let Some(d) = &meta.duet {
+        if let Ok(rev) = session::find(&d.peer, Some(&meta.repo_name)) {
+            if tmux::has(&rev.tmux) {
+                let _ = tmux::kill(&rev.tmux);
+            }
+            let _ = rev.delete();
+        }
+        DuetState::delete(&meta.id());
+    }
     if tmux::has(&meta.tmux) {
         tmux::kill(&meta.tmux)?;
     }
     if meta.worktree.exists() {
+        // Leftover referee protocol files are krill's, not the agent's —
+        // untracked ones would block a non-force worktree remove.
+        if meta.duet.is_some() {
+            for f in ["REVIEW.md", "GATE.md"] {
+                let p = meta.worktree.join(f);
+                if p.exists()
+                    && git::run(&meta.worktree, &["ls-files", f])
+                        .map(|out| out.is_empty())
+                        .unwrap_or(false)
+                {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
         // krill's own injected hook settings are untracked and would
         // make a clean worktree look dirty to `git worktree remove` —
         // clean them up first (only when untracked, i.e. ours).
@@ -663,11 +1010,30 @@ mod tests {
 
     #[test]
     fn is_dirty_ignores_injected_claude_settings() {
-        assert!(!super::is_dirty(""));
-        assert!(!super::is_dirty("?? .claude/\n"));
-        assert!(!super::is_dirty("?? .claude/settings.local.json\n"));
-        assert!(super::is_dirty(" M src/main.rs\n"));
-        assert!(super::is_dirty("?? .claude/\n?? new-file.rs\n"));
+        assert!(!super::is_dirty("", false));
+        assert!(!super::is_dirty("?? .claude/\n", false));
+        assert!(!super::is_dirty("?? .claude/settings.local.json\n", false));
+        assert!(super::is_dirty(" M src/main.rs\n", false));
+        assert!(super::is_dirty("?? .claude/\n?? new-file.rs\n", false));
+    }
+
+    #[test]
+    fn is_dirty_ignores_duet_protocol_files_only_for_duets() {
+        assert!(super::is_dirty("?? REVIEW.md\n", false));
+        assert!(!super::is_dirty("?? REVIEW.md\n?? GATE.md\n", true));
+        assert!(super::is_dirty("?? REVIEW.md\n M src/lib.rs\n", true));
+        // Only root-level protocol files are krill's.
+        assert!(super::is_dirty("?? docs/REVIEW.md\n", true));
+    }
+
+    #[test]
+    fn tail_chars_cuts_on_char_boundaries() {
+        assert_eq!(super::tail_chars("abcdef", 10), "abcdef");
+        assert_eq!(super::tail_chars("abcdef", 3), "def");
+        // 한글 is 3 bytes/char: a naive byte slice would panic.
+        let s = "가나다";
+        assert_eq!(super::tail_chars(s, 4), "다");
+        assert_eq!(super::tail_chars(s, 6), "나다");
     }
 
     #[test]

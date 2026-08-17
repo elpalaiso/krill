@@ -55,8 +55,25 @@ flow 필드를 보고 다음 스테이지를 `--from` 릴레이로 자동 스폰
 meta.repo_path 기준(create_session_full의 `at` 씸). ls는 FLOW 컬럼(flow
 세션이 있을 때만), TUI는 미리보기 타이틀에 `flow:stage` 표시.
 
-다음 마일스톤: M5b 듀엣(턴제 핑퐁 — 공유 worktree, REVIEW.md 프로토콜,
-gate, 라운드 캡), M5c planner+plan.md 순회. docs/DESIGN.md §12.1.
+M5b 완료(설계 DESIGN.md §12.1 결정 4): `krill duet <이름> -m "작업"` —
+worker(일반 세션) + reviewer(같은 worktree에 tmux만 하나 더, `<이름>-rev`)의
+턴제 핑퐁. 심판의 두뇌는 순수 상태 머신 `krill-core/src/duet.rs`의
+`step(state, event)`이고, 훅/게이트 자식은 그 결정(Action)을 IO로 옮기기만
+한다. 훅 식별: 한 worktree에 settings.local.json이 하나뿐이라, krill이
+에이전트를 띄울 때 `KRILL_SESSION_ID=<id>`를 명령 앞에 심고 훅 명령은
+`-i "${KRILL_SESSION_ID:-<literal>}"` (수동 실행은 literal 폴백). 프로토콜:
+reviewer는 REVIEW.md만 작성(첫 줄 LGTM/ISSUES, LGTM 외 텍스트는 ISSUES로
+간주), LGTM이면 gate(우선순위 CLI --gate > `[repos.*] gate` > `[duet]
+gate`)를 detached `krill duet-gate` 자식으로 실행(훅을 블록하지 않음), 실패
+출력은 GATE.md로. REVIEW/GATE.md 수명은 심판이 관리(다음 리뷰 전·LGTM 판독
+후 삭제, merge의 dirty 판정과 rm의 non-force remove에서도 무시/정리).
+라운드(재작업 횟수)가 캡(기본 2, `--max-rounds`) 도달 시 needs-you + ntfy.
+duet 상태는 `state/<worker-id>.duet.kv`(awaiting 턴 뮤텍스 — 어긋난 Stop은
+무시). rm은 worker에서 듀엣 전체 캐스케이드(reviewer만 rm하면 tmux+메타만),
+merge는 reviewer 세션이면 거부. ls FLOW 컬럼·TUI 타이틀에 duet:역할 표시.
+
+다음 마일스톤: M5c planner+plan.md 순회(작업마다 듀엣, 완료 시 커밋+체크박스
+갱신, 시작 전 사람의 계획 승인). docs/DESIGN.md §12.1.
 
 ## 설계 원칙 (요약 — 상세는 DESIGN.md §4)
 

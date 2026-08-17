@@ -424,13 +424,31 @@ stderr로 알린다. 메타 추가 필드: `flow`, `flow_stage`, `flow_base`,
 
 **결정 4 — 듀엣은 한 worktree, 두 tmux.** git은 같은 브랜치를 두
 worktree에 못 얹고, 턴제 뮤텍스라 동시 쓰기도 없다. 따라서 worker/reviewer는
-같은 worktree에 tmux 세션만 둘이다. 교환 프로토콜은 파일: reviewer는 코드가
-아니라 `REVIEW.md`만 쓰고(첫 줄 `LGTM` 또는 `ISSUES`), worker가 지적을
-반영한다. 심판은 결정적 코드: reviewer의 Done 훅이 REVIEW.md 첫 줄을 읽고
-LGTM이면 gate 명령을 돌린다 — 단, cargo test 같은 게이트는 느리므로 훅이
-직접 돌리지 않고 **detached 자식 `krill` 프로세스로 위임**해 훅(에이전트의
-턴 종료)을 블록하지 않는다. gate 통과 → 완료(ntfy), ISSUES 또는 gate 실패
-→ 라운드 캡 안에서 worker에 send-keys, 캡 초과 → needs-you.
+같은 worktree에 tmux 세션만 둘이다(reviewer가 worker의 **커밋 전** 변경까지
+봐야 하므로 분리 worktree는 답이 아니다). 교환 프로토콜은 파일: reviewer는
+코드가 아니라 `REVIEW.md`만 쓰고(첫 줄 `LGTM` 또는 `ISSUES`), worker가
+지적을 반영한다. 심판은 결정적 코드: reviewer의 Done 훅이 REVIEW.md 첫 줄을
+읽고 LGTM이면 gate 명령을 돌린다 — 단, cargo test 같은 게이트는 느리므로
+훅이 직접 돌리지 않고 **detached 자식 `krill` 프로세스로 위임**해
+훅(에이전트의 턴 종료)을 블록하지 않는다. gate 통과 → 완료(ntfy), ISSUES
+또는 gate 실패 → 라운드 캡 안에서 worker에 send-keys, 캡 초과 → needs-you.
+
+세부 규칙 네 가지(M5b). **훅 식별**: worktree당 settings.local.json이
+하나라 두 세션의 훅이 같은 id로 보고하게 되는 문제는, krill이 에이전트를
+띄울 때 `KRILL_SESSION_ID=<id>`를 명령 앞에 심고 훅 명령을
+`-i "${KRILL_SESSION_ID:-<literal-id>}"`로 주입해 푼다 — krill이 띄운
+에이전트는 자기 id로 보고하고, 사용자가 worktree에서 수동 실행한 에이전트는
+literal 폴백(기존 동작)으로 남는다. **파일 수명**: REVIEW.md/GATE.md는
+uncommitted 잡음이므로 심판이 관리한다 — worker의 턴이 끝나 reviewer를
+호출하기 직전에 삭제(이전 라운드의 stale 판정 방지), LGTM 판독 직후 삭제
+(gate·머지를 오염시키지 않게). reviewer가 REVIEW.md를 안 썼으면 재지시하되
+라운드를 소모한다(무한 루프 방지). **턴 뮤텍스**: 듀엣 상태 파일
+(`state/<worker-id>.duet.kv`: round, max_rounds, gate, awaiting)의 awaiting
+필드가 지금 누구의 Done이 유효한지 정한다 — Stop은 턴마다 발화하므로
+awaiting과 다른 쪽의 훅은 무시(멱등). **라운드**: round = worker에게
+되돌려 보낸 재작업 횟수. ISSUES·gate 실패가 라운드를 소모하고, 캡(기본 2)
+도달 시 needs-you + ntfy로 사람을 부른다. 상태 전이는 순수 함수
+(`duet::step`)로 두고 훅/자식 프로세스는 그 결정을 IO로 옮기기만 한다.
 
 **결정 5 — plan.yaml이 아니라 plan.md.** krill-core는 순수 std라 YAML
 파서를 넣지 않는다(원칙 4). planner의 산출물은 마크다운 체크리스트

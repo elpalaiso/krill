@@ -21,6 +21,8 @@ pub struct AgentCfg {
 pub struct RepoCfg {
     pub path: PathBuf,
     pub base: String,
+    /// Repo-specific duet gate command (e.g. "cargo test").
+    pub gate: Option<String>,
 }
 
 /// `[serve]` — the M2 web UI. Security rule (design §7): binding a
@@ -36,6 +38,15 @@ impl Default for ServeCfg {
     fn default() -> ServeCfg {
         ServeCfg { port: 7777, bind: "127.0.0.1".into(), token: None }
     }
+}
+
+/// `[duet]` — defaults for `krill duet` (M5b). Priority per field:
+/// CLI flag > repo gate (gate only) > this section > built-in.
+#[derive(Debug, Clone, Default)]
+pub struct DuetCfg {
+    pub reviewer: Option<String>,
+    pub gate: Option<String>,
+    pub max_rounds: Option<u32>,
 }
 
 /// One stage of a `[flows.*]` chain (design §12.1). Stages are numbered
@@ -61,6 +72,8 @@ pub struct Config {
     pub ntfy_topic: Option<String>,
     /// `[flows.<name>.<n>]` — stage chains for `krill new --flow` (M5a).
     pub flows: BTreeMap<String, Vec<FlowStage>>,
+    /// `[duet]` — worker/reviewer ping-pong defaults (M5b).
+    pub duet: DuetCfg,
 }
 
 /// The prompt a flow stage sends: the stage template with `{goal}`
@@ -109,6 +122,12 @@ cmd = ""                  # 빈 cmd = 그냥 셸 (테스트용)
 # [flows.shipit.2]
 # agent = "codex"                    # 생략 시 default_agent
 # m = "직전 스테이지의 변경을 리뷰하고 문제를 직접 고쳐줘"
+
+# 듀엣 기본값: krill duet <이름> -m "작업" (worker+reviewer 턴제 핑퐁)
+# [duet]
+# reviewer = "codex"                 # 기본 리뷰어 (생략 시 default_agent)
+# gate = "cargo test"                # LGTM 뒤에 도는 객관 게이트 ([repos.*] gate가 우선)
+# max_rounds = 2                     # 재작업 왕복 캡
 "#;
 
 pub const DEFAULT_CONFIG_EN: &str = r#"# krill config
@@ -146,6 +165,12 @@ cmd = ""                  # empty cmd = plain shell (for testing)
 # [flows.shipit.2]
 # agent = "codex"                   # omitted = default_agent
 # m = "review the previous stage's changes and fix any issues yourself"
+
+# duet defaults: krill duet <name> -m "task" (worker+reviewer ping-pong)
+# [duet]
+# reviewer = "codex"                # default reviewer (omitted = default_agent)
+# gate = "cargo test"               # objective gate after LGTM ([repos.*] gate wins)
+# max_rounds = 2                    # rework round cap
 "#;
 
 /// The default config template in the current language. Both variants
@@ -275,13 +300,25 @@ fn parse(raw: &str) -> Result<Config> {
                 let entry = config.repos.entry(name).or_insert(RepoCfg {
                     path: PathBuf::new(),
                     base: "main".into(),
+                    gate: None,
                 });
                 match key {
                     "path" => entry.path = PathBuf::from(value),
                     "base" => entry.base = value,
+                    "gate" if !value.is_empty() => entry.gate = Some(value),
                     _ => {}
                 }
             }
+            "duet" => match key {
+                "reviewer" if !value.is_empty() => config.duet.reviewer = Some(value),
+                "gate" if !value.is_empty() => config.duet.gate = Some(value),
+                "max_rounds" => {
+                    config.duet.max_rounds = Some(
+                        value.parse().with_context(|| msg::cfg_value_parse_failed(lineno))?,
+                    )
+                }
+                _ => {}
+            },
             s if s.starts_with("flows.") => {
                 // `flows.<name>.<n>`; a non-numeric tail (future keys like
                 // `[flows.x.gate]`) is ignored for forward compat.
@@ -477,6 +514,24 @@ port = 7777
         assert!(parse("x = 'unterminated\n").is_err()); // unclosed '
         assert!(parse("x = \"abc\\").is_err()); // string ends on a bare backslash
         assert!(parse("[repos.r]\nbase = main\n").is_err()); // repo without path
+    }
+
+    #[test]
+    fn parses_duet_section_and_repo_gate() {
+        let c = parse(
+            "[duet]\nreviewer = \"codex\"\ngate = \"cargo test\"\nmax_rounds = 3\n\
+             [repos.web]\npath = \"/w\"\ngate = \"npm test\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.duet.reviewer.as_deref(), Some("codex"));
+        assert_eq!(c.duet.gate.as_deref(), Some("cargo test"));
+        assert_eq!(c.duet.max_rounds, Some(3));
+        assert_eq!(c.repos["web"].gate.as_deref(), Some("npm test"));
+
+        assert!(parse("[duet]\nmax_rounds = not-a-number\n").is_err());
+        let d = parse("").unwrap().duet;
+        assert!(d.reviewer.is_none() && d.gate.is_none() && d.max_rounds.is_none());
+        assert!(parse("[duet]\ngate = \"\"\n").unwrap().duet.gate.is_none());
     }
 
     #[test]

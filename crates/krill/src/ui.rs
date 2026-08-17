@@ -651,6 +651,12 @@ impl App {
             .flow
             .as_ref()
             .map(|f| format!("{}:{} · ", f.flow, f.stage))
+            .or_else(|| {
+                r.meta
+                    .duet
+                    .as_ref()
+                    .map(|d| format!("duet:{} · ", d.role.as_str()))
+            })
             .unwrap_or_default();
         let title = format!(" {} · {} · {}{} ", r.meta.name, r.meta.agent, flow, r.diff);
         let mut footer = format!(" {} ← {}", r.meta.branch, r.meta.base);
@@ -779,6 +785,7 @@ mod tests {
                 tmux: format!("krill_{repo}_{name}"),
                 created_unix: created,
                 flow: None,
+                duet: None,
             },
             health,
             age,

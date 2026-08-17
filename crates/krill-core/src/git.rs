@@ -10,6 +10,8 @@ pub struct RepoRef {
     pub name: String,
     pub path: PathBuf,
     pub base: String,
+    /// Duet gate command from `[repos.*] gate`, if configured.
+    pub gate: Option<String>,
 }
 
 /// Run `git -C <dir> <args...>`, returning trimmed stdout or a rich error.
@@ -64,7 +66,7 @@ pub fn resolve_repo(config: &Config, flag: Option<&str>, cwd: &Path) -> Result<R
         if toplevel(&path).is_none() {
             bail!(msg::repo_path_not_git(&path.display().to_string()));
         }
-        return Ok(RepoRef { name: name.into(), path, base: rc.base.clone() });
+        return Ok(RepoRef { name: name.into(), path, base: rc.base.clone(), gate: rc.gate.clone() });
     }
 
     let Some(top) = toplevel(cwd) else {
@@ -79,7 +81,7 @@ pub fn resolve_repo(config: &Config, flag: Option<&str>, cwd: &Path) -> Result<R
             _ => p == top,
         };
         if same {
-            return Ok(RepoRef { name: name.clone(), path: top, base: rc.base.clone() });
+            return Ok(RepoRef { name: name.clone(), path: top, base: rc.base.clone(), gate: rc.gate.clone() });
         }
     }
 
@@ -89,7 +91,7 @@ pub fn resolve_repo(config: &Config, flag: Option<&str>, cwd: &Path) -> Result<R
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".into());
     let base = detect_base(&top);
-    Ok(RepoRef { name, path: top, base })
+    Ok(RepoRef { name, path: top, base, gate: None })
 }
 
 pub fn worktree_add(repo: &Path, wt: &Path, branch: &str, base: &str) -> Result<()> {

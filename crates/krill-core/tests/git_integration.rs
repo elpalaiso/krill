@@ -95,7 +95,7 @@ fn resolve_repo_flag_configured_and_ad_hoc() {
 
     // Configured repo matched by path, then selected by flag.
     let mut cfg = Config::default();
-    cfg.repos.insert("myname".into(), RepoCfg { path: repo.clone(), base: "main".into() });
+    cfg.repos.insert("myname".into(), RepoCfg { path: repo.clone(), base: "main".into(), gate: None });
     assert_eq!(git::resolve_repo(&cfg, None, &repo).unwrap().name, "myname");
     let by_flag = git::resolve_repo(&cfg, Some("myname"), &t.0).unwrap();
     assert_eq!(by_flag.name, "myname");
