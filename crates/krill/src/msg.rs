@@ -29,6 +29,7 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill rm <이름> [-f|--force]        세션 · worktree · 브랜치 정리
+  krill serve [-b <주소>] [-p <포트>]  웹 UI (기본 127.0.0.1:7777, config [serve])
   krill --help | --version
 
 예시:
@@ -55,6 +56,7 @@ usage:
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill rm <name> [-f|--force]        remove session · worktree · branch
+  krill serve [-b <addr>] [-p <port>]  web UI (default 127.0.0.1:7777, config [serve])
   krill --help | --version
 
 examples:
@@ -244,6 +246,30 @@ messages! {
     tui_filter_hint() => {
         en: "(Enter keep · Esc clear)",
         ko: "(Enter 유지 · Esc 해제)",
+    }
+    serve_listening(addr: &str) => {
+        en: "web UI listening on http://{addr}  (stop: Ctrl-C)",
+        ko: "웹 UI: http://{addr}  (중지: Ctrl-C)",
+    }
+    serve_token_required() => {
+        en: "refusing to bind a non-loopback address without a token — set token under [serve] in config.toml (design doc §7)",
+        ko: "토큰 없이는 loopback이 아닌 주소에 바인드할 수 없습니다 — config.toml의 [serve]에 token을 설정하세요 (설계서 §7)",
+    }
+    serve_bad_bind(addr: &str) => {
+        en: "cannot parse bind address: {addr}",
+        ko: "바인드 주소를 해석할 수 없습니다: {addr}",
+    }
+    serve_bad_port(port: &str) => {
+        en: "cannot parse port: {port}",
+        ko: "포트를 해석할 수 없습니다: {port}",
+    }
+    serve_bind_failed(addr: &str) => {
+        en: "failed to bind {addr}",
+        ko: "{addr} 바인드 실패",
+    }
+    serve_start_failed() => {
+        en: "failed to start the web server",
+        ko: "웹 서버 시작 실패",
     }
 }
 

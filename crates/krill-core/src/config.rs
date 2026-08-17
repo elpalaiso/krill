@@ -23,6 +23,21 @@ pub struct RepoCfg {
     pub base: String,
 }
 
+/// `[serve]` — the M2 web UI. Security rule (design §7): binding a
+/// non-loopback address without a token refuses to start.
+#[derive(Debug, Clone)]
+pub struct ServeCfg {
+    pub port: u16,
+    pub bind: String,
+    pub token: Option<String>,
+}
+
+impl Default for ServeCfg {
+    fn default() -> ServeCfg {
+        ServeCfg { port: 7777, bind: "127.0.0.1".into(), token: None }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     /// Message language override ("ko" | "en"); see i18n.rs for priority.
@@ -30,6 +45,7 @@ pub struct Config {
     pub default_agent: Option<String>,
     pub agents: BTreeMap<String, AgentCfg>,
     pub repos: BTreeMap<String, RepoCfg>,
+    pub serve: ServeCfg,
 }
 
 pub const DEFAULT_CONFIG_KO: &str = r#"# krill config
@@ -216,7 +232,17 @@ fn parse(raw: &str) -> Result<Config> {
                     _ => {}
                 }
             }
-            _ => {} // unknown sections ignored (forward compat: [serve], [notify]…)
+            "serve" => match key {
+                "port" => {
+                    config.serve.port = value
+                        .parse()
+                        .with_context(|| msg::cfg_value_parse_failed(lineno))?
+                }
+                "bind" => config.serve.bind = value,
+                "token" if !value.is_empty() => config.serve.token = Some(value),
+                _ => {}
+            },
+            _ => {} // unknown sections ignored (forward compat: [notify]…)
         }
     }
 
@@ -318,7 +344,26 @@ port = 7777
         assert_eq!(c.agents["b"].cmd, r#"literal "quoted""#);
         assert_eq!(c.repos["web"].path, PathBuf::from("~/work/web"));
         assert_eq!(c.repos["web"].base, "develop");
-        assert_eq!(c.repos.len(), 1); // [serve] ignored, not a repo
+        assert_eq!(c.repos.len(), 1); // [serve] is not a repo
+        assert_eq!(c.serve.port, 7777); // [serve] port not set in this fixture
+    }
+
+    #[test]
+    fn parses_serve_section_with_defaults() {
+        let d = parse("").unwrap().serve;
+        assert_eq!(d.port, 7777);
+        assert_eq!(d.bind, "127.0.0.1");
+        assert!(d.token.is_none());
+
+        let s = parse("[serve]\nport = 8080\nbind = \"0.0.0.0\"\ntoken = \"s3cret\"\n")
+            .unwrap()
+            .serve;
+        assert_eq!(s.port, 8080);
+        assert_eq!(s.bind, "0.0.0.0");
+        assert_eq!(s.token.as_deref(), Some("s3cret"));
+
+        assert!(parse("[serve]\nport = not-a-number\n").is_err());
+        assert!(parse("[serve]\ntoken = \"\"\n").unwrap().serve.token.is_none());
     }
 
     #[test]

@@ -272,6 +272,20 @@ pub fn diff_worktree(worktree: &std::path::Path, base: &str, stat: bool, hold_pa
     Ok(())
 }
 
+/// `krill serve` — flags override config `[serve]`; the token comes
+/// from the config only (keeps it out of shell history).
+pub fn serve(bind: Option<&str>, port: Option<&str>) -> Result<()> {
+    let cfg = Config::load()?.serve;
+    let bind = bind.unwrap_or(&cfg.bind).to_string();
+    let port: u16 = match port {
+        Some(p) => p.parse().ok().ok_or_else(|| {
+            krill_core::error::Error::msg(m::serve_bad_port(p))
+        })?,
+        None => cfg.port,
+    };
+    crate::serve::run(&bind, port, cfg.token)
+}
+
 pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
     let meta = session::find(name, repo)?;
 

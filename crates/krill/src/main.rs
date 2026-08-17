@@ -2,6 +2,7 @@ mod ansi;
 mod args;
 mod commands;
 mod msg;
+mod serve;
 mod ui;
 
 use krill_core::bail;
@@ -51,6 +52,10 @@ fn run() -> Result<()> {
             let o = args::parse(rest, &[("-r", "--repo")], &[("", "--stat")])?;
             let name = o.pos.first().context(msg::name_required("diff"))?;
             commands::diff(name, o.val("--repo"), o.flag("--stat"))
+        }
+        "serve" => {
+            let o = args::parse(rest, &[("-b", "--bind"), ("-p", "--port")], &[])?;
+            commands::serve(o.val("--bind"), o.val("--port"))
         }
         "rm" => {
             let o = args::parse(rest, &[("-r", "--repo")], &[("-f", "--force")])?;

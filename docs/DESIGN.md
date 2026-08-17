@@ -229,6 +229,35 @@ TUI는 단일 화면이다. 왼쪽에 세션 목록(상태 아이콘, 에이전�
 
 웹 UI는 모바일 우선 반응형 한 페이지다. 세션이 상태색 카드로 나열되고, 카드를 탭하면 터미널 뷰(xterm.js — 읽기 + 입력 가능)와 디프 뷰가 열린다. NeedsYou 상태 카드에는 자주 쓰는 응답 버튼("y", "승인", "계속해")을 노출해 폰에서 타이핑 없이 넘길 수 있게 한다. 프런트엔드는 프레임워크 없이 vanilla JS + xterm.js를 rust-embed로 바이너리에 내장한다(html/css/js 도합 4파일 이내, CDN 의존 없음 — tailnet은 오프라인 환경일 수 있다).
 
+### 8.2 serve 상세 설계 (M2)
+
+서버는 무상태다 — 매 요청마다 tmux + 메타파일에서 재구성하므로(원칙 3) serve가
+죽어도 잃는 것이 없고, TUI와 같은 코어 함수를 공유한다. 정적 자산은 M2a에서는
+`include_str!`로 충분(파일 1개), xterm.js가 들어오는 M2b부터 rust-embed를 도입한다.
+
+**API (M2a 기준).**
+
+| 엔드포인트 | 응답 |
+|---|---|
+| `GET /` | 내장 index.html (카드 목록 + 미리보기, vanilla JS) |
+| `GET /api/sessions` | `[{name, repo, agent, state, age, diff}]` — 2초 폴링 |
+| `GET /api/preview/{repo}/{name}` | 현재 pane 텍스트 (capture-pane). 404 = 없음, 410 = tmux 죽음 |
+
+**인증 (§7의 구현).** 규칙은 코드에 고정: `bind`가 loopback이 아니면 config
+`[serve] token` 없이는 기동을 거부한다. 토큰이 설정되면 모든 요청이
+`?token=` 또는 `Authorization: Bearer`를 요구한다(401). 페이지 JS는 URL의
+`?token=`을 읽어 API 호출에 이어붙인다. TLS는 구현하지 않는다 — tailscale
+serve/역프록시에 위임(§7).
+
+**슬라이스.** M2a: 읽기 전용 — 카드 목록 + 텍스트 미리보기 + 토큰 인증
+(위 표 전부). M2b: 상호작용 — WebSocket + xterm.js 터미널(읽기+입력),
+rust-embed 도입, `--bind tailscale` 키워드(tailscale ip 자동 감지).
+M2c: 폴리시 — 퀵 리플라이 버튼(y/Enter 등, M3 NeedsYou의 전신), diff 뷰,
+`--expose`(funnel/cloudflared 감지 연동).
+
+블로킹 작업(tmux/git 서브프로세스)은 전부 `spawn_blocking`으로 실행자 밖에서.
+웹 터미널 리사이즈 문제(§13)는 M2b에서 "웹 뷰 80×24 고정"으로 단순화한다.
+
 ## 9. 설정 파일
 
 `~/.config/krill/config.toml` 하나로 끝낸다.
