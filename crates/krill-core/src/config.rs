@@ -38,6 +38,17 @@ impl Default for ServeCfg {
     }
 }
 
+/// One stage of a `[flows.*]` chain (design §12.1). Stages are numbered
+/// sections (`[flows.shipit.1]`) because the hand-rolled parser is flat
+/// on purpose; the vector index is stage number − 1.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlowStage {
+    /// Agent name; None = default_agent at spawn time.
+    pub agent: Option<String>,
+    /// Prompt template; `{goal}` is replaced with the flow's goal.
+    pub m: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     /// Message language override ("ko" | "en"); see i18n.rs for priority.
@@ -48,6 +59,19 @@ pub struct Config {
     pub serve: ServeCfg,
     /// `[notify] ntfy_topic` — bare topic ("krill-me-x8f2") or full URL.
     pub ntfy_topic: Option<String>,
+    /// `[flows.<name>.<n>]` — stage chains for `krill new --flow` (M5a).
+    pub flows: BTreeMap<String, Vec<FlowStage>>,
+}
+
+/// The prompt a flow stage sends: the stage template with `{goal}`
+/// substituted, the goal itself when there is no template, or nothing
+/// (bare agent) when neither exists.
+pub fn stage_prompt(stage_m: Option<&str>, goal: &str) -> Option<String> {
+    match stage_m {
+        Some(t) => Some(t.replace("{goal}", goal)),
+        None if goal.is_empty() => None,
+        None => Some(goal.to_string()),
+    }
 }
 
 pub const DEFAULT_CONFIG_KO: &str = r#"# krill config
@@ -77,6 +101,14 @@ cmd = ""                  # 빈 cmd = 그냥 셸 (테스트용)
 
 # [notify]
 # ntfy_topic = "krill-나만아는-랜덤접미사"   # needs-you/done 시 폰 푸시 (ntfy.sh)
+
+# flow: 스테이지가 Done이 되면 다음 스테이지가 자동으로 이어받습니다 (릴레이 체인).
+# 시작: krill new <이름> --flow shipit -m "목표"  ({goal} 자리에 들어감)
+# [flows.shipit.1]
+# m = "구현해줘: {goal}"
+# [flows.shipit.2]
+# agent = "codex"                    # 생략 시 default_agent
+# m = "직전 스테이지의 변경을 리뷰하고 문제를 직접 고쳐줘"
 "#;
 
 pub const DEFAULT_CONFIG_EN: &str = r#"# krill config
@@ -106,6 +138,14 @@ cmd = ""                  # empty cmd = plain shell (for testing)
 
 # [notify]
 # ntfy_topic = "krill-yours-x8f2"   # phone push on needs-you/done (ntfy.sh)
+
+# flows: when a stage goes Done, the next stage takes over (relay chain).
+# start with: krill new <name> --flow shipit -m "goal"  (fills {goal})
+# [flows.shipit.1]
+# m = "implement: {goal}"
+# [flows.shipit.2]
+# agent = "codex"                   # omitted = default_agent
+# m = "review the previous stage's changes and fix any issues yourself"
 "#;
 
 /// The default config template in the current language. Both variants
@@ -190,6 +230,8 @@ fn expand_tilde_with(p: &Path, home: &Path) -> PathBuf {
 fn parse(raw: &str) -> Result<Config> {
     let mut config = Config::default();
     let mut section = String::new();
+    // flow name → stage number → stage; folded into config.flows at the end.
+    let mut flow_stages: BTreeMap<String, BTreeMap<usize, FlowStage>> = BTreeMap::new();
 
     for (idx, line) in raw.lines().enumerate() {
         let lineno = idx + 1;
@@ -240,6 +282,25 @@ fn parse(raw: &str) -> Result<Config> {
                     _ => {}
                 }
             }
+            s if s.starts_with("flows.") => {
+                // `flows.<name>.<n>`; a non-numeric tail (future keys like
+                // `[flows.x.gate]`) is ignored for forward compat.
+                let rest = s.trim_start_matches("flows.");
+                if let Some((flow, n)) = rest.rsplit_once('.') {
+                    if let Ok(n) = n.parse::<usize>() {
+                        let stage = flow_stages
+                            .entry(flow.to_string())
+                            .or_default()
+                            .entry(n)
+                            .or_default();
+                        match key {
+                            "agent" => stage.agent = Some(value),
+                            "m" => stage.m = Some(value),
+                            _ => {}
+                        }
+                    }
+                }
+            }
             "notify" => {
                 if key == "ntfy_topic" && !value.is_empty() {
                     config.ntfy_topic = Some(value);
@@ -263,6 +324,15 @@ fn parse(raw: &str) -> Result<Config> {
         if rc.path.as_os_str().is_empty() {
             bail!(msg::cfg_repo_missing_path(name));
         }
+    }
+    // Stage numbers must run 1..=N with no gaps — a silently reordered
+    // chain would be worse than an error.
+    for (flow, stages) in flow_stages {
+        let n = stages.len();
+        if !(1..=n).all(|i| stages.contains_key(&i)) {
+            bail!(msg::cfg_flow_stages_not_contiguous(&flow));
+        }
+        config.flows.insert(flow, stages.into_values().collect());
     }
     Ok(config)
 }
@@ -407,6 +477,50 @@ port = 7777
         assert!(parse("x = 'unterminated\n").is_err()); // unclosed '
         assert!(parse("x = \"abc\\").is_err()); // string ends on a bare backslash
         assert!(parse("[repos.r]\nbase = main\n").is_err()); // repo without path
+    }
+
+    #[test]
+    fn parses_flow_stages_in_order() {
+        let c = parse(
+            r#"
+[flows.shipit.2]
+agent = "codex"
+m = "review: {goal}"
+
+[flows.shipit.1]
+m = "implement: {goal}"
+
+[flows.other.1]
+agent = "claude"
+
+[flows.shipit.gate]
+cmd = "ignored for now (forward compat)"
+"#,
+        )
+        .unwrap();
+        let ship = &c.flows["shipit"];
+        assert_eq!(ship.len(), 2); // out-of-file-order sections still sort 1,2
+        assert_eq!(ship[0].agent, None);
+        assert_eq!(ship[0].m.as_deref(), Some("implement: {goal}"));
+        assert_eq!(ship[1].agent.as_deref(), Some("codex"));
+        assert_eq!(c.flows["other"][0].agent.as_deref(), Some("claude"));
+        assert!(parse("").unwrap().flows.is_empty());
+    }
+
+    #[test]
+    fn rejects_flow_stage_gaps() {
+        assert!(parse("[flows.x.1]\nm = \"a\"\n[flows.x.3]\nm = \"b\"\n").is_err());
+        assert!(parse("[flows.x.0]\nm = \"a\"\n").is_err()); // must start at 1
+        assert!(parse("[flows.x.2]\nm = \"a\"\n").is_err());
+    }
+
+    #[test]
+    fn stage_prompt_rules() {
+        assert_eq!(stage_prompt(Some("do: {goal}!"), "fix"), Some("do: fix!".into()));
+        assert_eq!(stage_prompt(Some("static"), "fix"), Some("static".into()));
+        assert_eq!(stage_prompt(Some("g={goal}"), ""), Some("g=".into()));
+        assert_eq!(stage_prompt(None, "fix"), Some("fix".into()));
+        assert_eq!(stage_prompt(None, ""), None);
     }
 
     #[test]

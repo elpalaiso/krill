@@ -646,7 +646,13 @@ impl App {
         let Some(r) = self.rows.get(self.selected) else {
             return;
         };
-        let title = format!(" {} · {} · {} ", r.meta.name, r.meta.agent, r.diff);
+        let flow = r
+            .meta
+            .flow
+            .as_ref()
+            .map(|f| format!("{}:{} · ", f.flow, f.stage))
+            .unwrap_or_default();
+        let title = format!(" {} · {} · {}{} ", r.meta.name, r.meta.agent, flow, r.diff);
         let mut footer = format!(" {} ← {}", r.meta.branch, r.meta.base);
         if let Some(age) = r.age {
             footer.push_str(&format!(" · {}", m::tui_last_output(&krill_core::fmt_age(age))));
@@ -772,6 +778,7 @@ mod tests {
                 cmd: String::new(),
                 tmux: format!("krill_{repo}_{name}"),
                 created_unix: created,
+                flow: None,
             },
             health,
             age,

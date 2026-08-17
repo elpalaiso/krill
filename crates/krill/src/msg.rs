@@ -26,6 +26,8 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
       -r, --repo <이름>               대상 리포 (생략 시 현재 디렉토리의 리포)
       -m, --message <지시문>          에이전트에게 넘길 첫 지시문
           --from <세션>               다른 세션의 브랜치에서 시작 (릴레이 핸드오프)
+          --flow <flow>               [flows.*] 체인 시작 — 스테이지가 Done이 되면
+                                      다음 스테이지를 자동 릴레이 (-m = 목표, {goal})
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill merge <이름> [--squash]       base에 머지 후 세션 정리 (base 체크아웃 상태에서)
@@ -56,6 +58,8 @@ usage:
       -r, --repo <name>               target repo (default: the repo at cwd)
       -m, --message <prompt>          first instruction passed to the agent
           --from <session>            branch off another session's work (relay handoff)
+          --flow <flow>               start a [flows.*] chain — each Done stage
+                                      auto-relays the next (-m = goal, {goal})
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill merge <name> [--squash]       merge into base + clean up (run with base checked out)
@@ -296,6 +300,34 @@ messages! {
     ntfy_done(id: &str) => {
         en: "{id} done",
         ko: "{id} 작업 완료",
+    }
+    flow_unknown(name: &str, flows: &str) => {
+        en: "flow '{name}' is not in the config. registered flows: {flows}",
+        ko: "'{name}' flow가 설정에 없습니다. 등록된 flow: {flows}",
+    }
+    flow_none_registered() => {
+        en: "(none — add [flows.<name>.1] sections to config.toml)",
+        ko: "(없음 — config.toml에 [flows.<이름>.1] 섹션을 추가하세요)",
+    }
+    flow_flag_conflict() => {
+        en: "--flow cannot be combined with --from or -a (stages define both)",
+        ko: "--flow는 --from, -a와 함께 쓸 수 없습니다 (스테이지가 대신 정합니다)",
+    }
+    flow_agent_no_hooks(agent: &str, stage: usize) => {
+        en: "warning: agent '{agent}' (stage {stage}) has no hook preset — the chain will stall there; add `hooks = \"claude-code\"` or make it the last stage.",
+        ko: "경고: '{agent}' 에이전트(스테이지 {stage})에 훅 프리셋이 없어 체인이 거기서 멈춥니다 — `hooks = \"claude-code\"`를 추가하거나 마지막 스테이지로 두세요.",
+    }
+    ntfy_flow_next(flow: &str, stage: usize, total: usize, name: &str, agent: &str) => {
+        en: "flow {flow}: stage {stage}/{total} started — {name} ({agent})",
+        ko: "flow {flow}: 스테이지 {stage}/{total} 시작 — {name} ({agent})",
+    }
+    ntfy_flow_done(flow: &str, name: &str) => {
+        en: "flow {flow} finished at {name} — review the result",
+        ko: "flow {flow} 완료 ({name}) — 결과를 확인하세요",
+    }
+    ntfy_flow_spawn_failed(flow: &str, name: &str, err: &str) => {
+        en: "flow {flow}: failed to start {name}: {err}",
+        ko: "flow {flow}: {name} 시작 실패: {err}",
     }
     merge_dirty(name: &str) => {
         en: "session '{name}' has uncommitted changes — commit them in the session first (krill attach {name}).",

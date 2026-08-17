@@ -1,7 +1,19 @@
+use crate::config::FlowStage;
 use crate::error::{Context, Result};
 use crate::{bail, kv, msg};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// Membership of a `[flows.*]` chain (M5a, design §12.1). Stage sessions
+/// are named `<base>-<stage>`; the goal rides along so later stages can
+/// substitute `{goal}` into their prompt templates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowRef {
+    pub flow: String,
+    pub stage: usize,
+    pub base: String,
+    pub goal: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
@@ -17,6 +29,8 @@ pub struct SessionMeta {
     /// tmux session name.
     pub tmux: String,
     pub created_unix: u64,
+    /// Set when this session is a stage of a flow chain.
+    pub flow: Option<FlowRef>,
 }
 
 impl SessionMeta {
@@ -44,12 +58,30 @@ impl SessionMeta {
         m.insert("cmd".into(), self.cmd.clone());
         m.insert("tmux".into(), self.tmux.clone());
         m.insert("created_unix".into(), self.created_unix.to_string());
+        if let Some(f) = &self.flow {
+            m.insert("flow".into(), f.flow.clone());
+            m.insert("flow_stage".into(), f.stage.to_string());
+            m.insert("flow_base".into(), f.base.clone());
+            m.insert("flow_goal".into(), f.goal.clone());
+        }
         m
     }
 
     fn from_map(m: &BTreeMap<String, String>) -> Result<SessionMeta> {
         let req = |k: &str| -> Result<String> {
             m.get(k).cloned().with_context(|| msg::meta_field_missing(k))
+        };
+        // Optional flow membership: absent on pre-M5 metas.
+        let flow = match m.get("flow") {
+            Some(flow) => Some(FlowRef {
+                flow: flow.clone(),
+                stage: req("flow_stage")?
+                    .parse()
+                    .context(msg::meta_flow_stage_parse_failed())?,
+                base: req("flow_base")?,
+                goal: m.get("flow_goal").cloned().unwrap_or_default(),
+            }),
+            None => None,
         };
         Ok(SessionMeta {
             name: req("name")?,
@@ -64,6 +96,7 @@ impl SessionMeta {
             created_unix: req("created_unix")?
                 .parse()
                 .context(msg::meta_created_parse_failed())?,
+            flow,
         })
     }
 
@@ -159,6 +192,47 @@ fn read_hook_state(meta: &SessionMeta) -> Option<(HookState, u64)> {
     let map = kv::read_file(&path).ok()?;
     let state = HookState::parse(map.get("state")?.as_str())?;
     Some((state, age))
+}
+
+// ---- flow chain (M5a) -------------------------------------------------------
+
+/// What the Done hook should do for a flow-member session.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FlowNext<'a> {
+    /// Spawn stage `stage_no` as session `name` (relay off the current one).
+    Spawn {
+        stage_no: usize,
+        stage: &'a FlowStage,
+        name: String,
+    },
+    /// This was the last stage — the chain is complete.
+    End,
+    /// The next stage session already exists (Stop fires every turn — idempotent).
+    Exists,
+    /// The flow vanished from the config since the chain started.
+    UnknownFlow,
+}
+
+/// Pure chain rule: given the config's flows, this session's membership,
+/// and the session names already taken in the same repo, decide the next
+/// action. The hook wraps this with the actual spawn.
+pub fn flow_next<'a>(
+    flows: &'a BTreeMap<String, Vec<FlowStage>>,
+    fr: &FlowRef,
+    taken_names: &[String],
+) -> FlowNext<'a> {
+    let Some(stages) = flows.get(&fr.flow) else {
+        return FlowNext::UnknownFlow;
+    };
+    let next_no = fr.stage + 1;
+    if next_no > stages.len() {
+        return FlowNext::End;
+    }
+    let name = format!("{}-{}", fr.base, next_no);
+    if taken_names.iter().any(|n| n == &name) {
+        return FlowNext::Exists;
+    }
+    FlowNext::Spawn { stage_no: next_no, stage: &stages[next_no - 1], name }
 }
 
 // ---- status -----------------------------------------------------------------
@@ -295,6 +369,7 @@ mod tests {
             cmd: "claude 'do it'\nsecond line".into(),
             tmux: format!("krill_{repo}_{name}"),
             created_unix: created,
+            flow: None,
         }
     }
 
@@ -317,6 +392,68 @@ mod tests {
         assert_eq!(back.cmd, m.cmd);
         assert_eq!(back.tmux, m.tmux);
         assert_eq!(back.created_unix, m.created_unix);
+    }
+
+    #[test]
+    fn flow_membership_roundtrips_and_validates() {
+        let mut m = meta("fix-1", "web", 1);
+        m.flow = Some(FlowRef {
+            flow: "shipit".into(),
+            stage: 1,
+            base: "fix".into(),
+            goal: "로그인 버그".into(),
+        });
+        let back = SessionMeta::from_map(&m.to_map()).unwrap();
+        assert_eq!(back.flow, m.flow);
+
+        // Pre-M5 meta (no flow keys) still loads.
+        assert_eq!(SessionMeta::from_map(&meta("a", "r", 1).to_map()).unwrap().flow, None);
+
+        // A flow entry with a broken stage number is an error, not a guess.
+        let mut bad = m.to_map();
+        bad.insert("flow_stage".into(), "NaN".into());
+        assert!(SessionMeta::from_map(&bad).is_err());
+        let mut no_base = m.to_map();
+        no_base.remove("flow_base");
+        assert!(SessionMeta::from_map(&no_base).is_err());
+        let mut no_goal = m.to_map();
+        no_goal.remove("flow_goal");
+        assert_eq!(SessionMeta::from_map(&no_goal).unwrap().flow.unwrap().goal, "");
+    }
+
+    #[test]
+    fn flow_next_decides_spawn_end_exists_unknown() {
+        let mut flows = BTreeMap::new();
+        flows.insert(
+            "shipit".to_string(),
+            vec![
+                FlowStage { agent: None, m: Some("implement {goal}".into()) },
+                FlowStage { agent: Some("codex".into()), m: None },
+            ],
+        );
+        let fr = |stage| FlowRef {
+            flow: "shipit".into(),
+            stage,
+            base: "fix".into(),
+            goal: "g".into(),
+        };
+
+        match flow_next(&flows, &fr(1), &["fix-1".into()]) {
+            FlowNext::Spawn { stage_no, stage, name } => {
+                assert_eq!(stage_no, 2);
+                assert_eq!(stage.agent.as_deref(), Some("codex"));
+                assert_eq!(name, "fix-2");
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+        assert_eq!(
+            flow_next(&flows, &fr(1), &["fix-1".into(), "fix-2".into()]),
+            FlowNext::Exists
+        );
+        assert_eq!(flow_next(&flows, &fr(2), &[]), FlowNext::End);
+        assert_eq!(flow_next(&flows, &fr(9), &[]), FlowNext::End); // config shrank
+        let none = BTreeMap::new();
+        assert_eq!(flow_next(&none, &fr(1), &[]), FlowNext::UnknownFlow);
     }
 
     #[test]

@@ -386,6 +386,63 @@ gate     = "cargo test && cargo clippy"   # 이걸 못 넘으면 LGTM 무효
 
 명시적으로 미루는 것: 여러 에이전트가 같은 파일을 동시에 만지며 역할을 실시간 협상하는 자유 협업형. 오케스트레이터 자체가 또 하나의 모델이 되어야 하고 업계 표준(A2A 등)도 정리되지 않은 연구 영역이며, 실용 가치의 대부분은 듀엣 + 작업의 파일 경계 분할로 이미 확보된다.
 
+### 12.1 M5 구현 설계 — 슬라이스와 결정
+
+**결정 1 — 엔진은 훅이다 (데몬 0 유지).** flow/듀엣의 "심판"은 상주
+프로세스가 아니라 `krill hook done -i <id>` 안에서 돈다. 훅은 이미 모든 턴
+종료(Stop/SessionEnd)마다 발화하므로, 여기서 세션 메타의 flow 필드를 보고
+다음 행동(다음 스테이지 스폰, 리뷰 지시 send-keys)을 결정하면 §6.1과 같은
+이유로 서버가 필요 없다. 따름정리: **flow에 참여하는 에이전트는 훅 프리셋이
+있어야 한다** (`hooks = "claude-code"`). 훅 없는 에이전트는 체인의 마지막
+스테이지로는 쓸 수 있지만 중간 스테이지로는 경고한다.
+
+**결정 2 — 스테이지는 번호 섹션.** 수제 TOML 파서(§9)는 flat 섹션 +
+스칼라만 지원하고, 이는 의도된 제약이다. 인라인 테이블 배열 대신:
+
+```toml
+[flows.shipit.1]
+agent = "claude"
+m = "구현해줘: {goal}"
+
+[flows.shipit.2]
+agent = "codex"          # 생략 시 default_agent
+m = "직전 스테이지의 변경을 리뷰하고 문제를 직접 고쳐줘: {goal}"
+```
+
+스테이지 번호는 1부터 연속이어야 한다(빠진 번호는 파스 에러 — 조용한
+순서 꼬임 방지). 프롬프트 규칙: 스테이지에 `m`이 있으면 `{goal}` 치환,
+없으면 goal 원문, goal도 없으면 맨 에이전트.
+
+**결정 3 — 체인은 릴레이의 자동화다.** `krill new <이름> --flow shipit -m
+"목표"`가 스테이지 1 세션 `<이름>-1`을 만들고, Done 훅이 `<이름>-2`를
+`--from <이름>-1`과 동일한 방식(이전 스테이지 브랜치에서 분기)으로 스폰한다.
+이전 세션은 죽이지 않는다 — 사람이 각 스테이지의 맥락을 검수할 수 있고,
+정리는 기존 rm/merge가 담당한다. Stop은 턴마다 발화하므로 **다음 스테이지
+세션이 이미 존재하면 무시**(멱등). 스폰 실패는 훅을 실패시키지 않고 ntfy +
+stderr로 알린다. 메타 추가 필드: `flow`, `flow_stage`, `flow_base`,
+`flow_goal` (전부 optional — 기존 메타와 호환).
+
+**결정 4 — 듀엣은 한 worktree, 두 tmux.** git은 같은 브랜치를 두
+worktree에 못 얹고, 턴제 뮤텍스라 동시 쓰기도 없다. 따라서 worker/reviewer는
+같은 worktree에 tmux 세션만 둘이다. 교환 프로토콜은 파일: reviewer는 코드가
+아니라 `REVIEW.md`만 쓰고(첫 줄 `LGTM` 또는 `ISSUES`), worker가 지적을
+반영한다. 심판은 결정적 코드: reviewer의 Done 훅이 REVIEW.md 첫 줄을 읽고
+LGTM이면 gate 명령을 돌린다 — 단, cargo test 같은 게이트는 느리므로 훅이
+직접 돌리지 않고 **detached 자식 `krill` 프로세스로 위임**해 훅(에이전트의
+턴 종료)을 블록하지 않는다. gate 통과 → 완료(ntfy), ISSUES 또는 gate 실패
+→ 라운드 캡 안에서 worker에 send-keys, 캡 초과 → needs-you.
+
+**결정 5 — plan.yaml이 아니라 plan.md.** krill-core는 순수 std라 YAML
+파서를 넣지 않는다(원칙 4). planner의 산출물은 마크다운 체크리스트
+(`- [ ] 작업`)로 한다 — 결정적 파싱이 자명하고, 사람이 그대로 편집·승인할
+수 있고, 에이전트도 잘 쓴다. §12 본문의 plan.yaml 표기는 이 형식으로
+대체된 것으로 읽는다.
+
+**슬라이스.** M5a: `[flows.*]` 파싱 + `krill new --flow` + Done 훅 자동
+체인 + ls/TUI flow 표기. M5b: `krill duet`(단일 작업 핑퐁 — 공유 worktree,
+REVIEW.md 프로토콜, gate, 라운드 캡). M5c: planner + plan.md 순회(작업마다
+듀엣, 완료 시 커밋 + 체크박스 갱신, 시작 전 사람의 계획 승인).
+
 ## 13. 리스크와 열린 질문
 
 **tmux 의존.** macOS/Linux에서는 사실상 표준이지만 Windows 네이티브가 없다. v1은 WSL2 안내로 대응하고, 수요가 생기면 `SessionBackend` trait에 PtyBackend를 추가한다.

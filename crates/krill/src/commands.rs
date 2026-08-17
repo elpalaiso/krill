@@ -3,7 +3,7 @@ use krill_core::bail;
 use krill_core::config::Config;
 use krill_core::error::{Context, Result};
 use krill_core::git;
-use krill_core::session::{self, SessionMeta, Status};
+use krill_core::session::{self, FlowNext, FlowRef, SessionMeta, Status};
 use krill_core::tmux;
 use std::io::Write as _;
 use std::process::Command;
@@ -44,8 +44,17 @@ pub fn new(
     repo: Option<&str>,
     message: Option<&str>,
     from: Option<&str>,
+    flow: Option<&str>,
 ) -> Result<()> {
-    let meta = create_session(name, agent, repo, message, from)?;
+    let meta = match flow {
+        Some(fl) => {
+            if from.is_some() || agent.is_some() {
+                bail!(m::flow_flag_conflict());
+            }
+            start_flow(name, fl, repo, message.unwrap_or(""))?
+        }
+        None => create_session(name, agent, repo, message, from)?,
+    };
     println!("{BOLD}{}{RESET} {}", meta.name, m::session_started());
     println!("  repo     {} ({})", meta.repo_name, meta.repo_path.display());
     println!("  branch   {} (base: {})", meta.branch, meta.base);
@@ -55,9 +64,50 @@ pub fn new(
         meta.agent,
         if meta.cmd.is_empty() { m::shell_only() } else { String::new() }
     );
+    if let Some(f) = &meta.flow {
+        println!("  flow     {} #{}", f.flow, f.stage);
+    }
     println!();
     println!("{}", m::attach_hint(&format!("{BOLD}krill attach {}{RESET}", meta.name)));
     Ok(())
+}
+
+/// Kick off stage 1 of a `[flows.*]` chain: session `<name>-1`, with the
+/// Done hook advancing the rest (design §12.1).
+fn start_flow(name: &str, flow: &str, repo: Option<&str>, goal: &str) -> Result<SessionMeta> {
+    let config = Config::load()?;
+    let Some(stages) = config.flows.get(flow) else {
+        bail!(m::flow_unknown(flow, &flow_names(&config)));
+    };
+    // A hookless agent can't fire the Done that advances the chain — warn
+    // up front for every stage but the last.
+    for (i, stage) in stages.iter().enumerate().take(stages.len().saturating_sub(1)) {
+        if let Ok((agent_name, cfg)) = config.resolve_agent(stage.agent.as_deref()) {
+            if cfg.hooks.is_none() {
+                eprintln!("{}", m::flow_agent_no_hooks(&agent_name, i + 1));
+            }
+        }
+    }
+    let stage = &stages[0];
+    let prompt = krill_core::config::stage_prompt(stage.m.as_deref(), goal);
+    let fr = FlowRef { flow: flow.into(), stage: 1, base: name.into(), goal: goal.into() };
+    create_session_full(
+        &format!("{name}-1"),
+        stage.agent.as_deref(),
+        repo,
+        prompt.as_deref(),
+        None,
+        None,
+        Some(fr),
+    )
+}
+
+fn flow_names(config: &Config) -> String {
+    if config.flows.is_empty() {
+        m::flow_none_registered()
+    } else {
+        config.flows.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
 }
 
 /// Branch + worktree + tmux session + agent, returning the saved meta.
@@ -69,11 +119,28 @@ pub fn create_session(
     message: Option<&str>,
     from: Option<&str>,
 ) -> Result<SessionMeta> {
+    create_session_full(name, agent, repo, message, from, None, None)
+}
+
+/// `at` overrides the cwd used for repo resolution — the hook chain runs
+/// with cwd inside a worktree, which must not be mistaken for the repo.
+fn create_session_full(
+    name: &str,
+    agent: Option<&str>,
+    repo: Option<&str>,
+    message: Option<&str>,
+    from: Option<&str>,
+    at: Option<&std::path::Path>,
+    flow: Option<FlowRef>,
+) -> Result<SessionMeta> {
     if !krill_core::valid_name(name) {
         bail!(m::invalid_session_name(name));
     }
     let config = Config::load()?;
-    let cwd = std::env::current_dir()?;
+    let cwd = match at {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
     let repo_ref = git::resolve_repo(&config, repo, &cwd)?;
     let (agent_name, agent_cfg) = config.resolve_agent(agent)?;
 
@@ -84,15 +151,17 @@ pub fn create_session(
         bail!(m::session_exists(name, &repo_ref.name));
     }
 
-    // Relay handoff (--from): branch off another session's work instead of base.
+    // Relay handoff (--from): branch off another session's work instead of
+    // base. Resolve within this repo first so a same-named session in
+    // another repo can't shadow it; fall back for the friendlier error.
     let base = match from {
-        Some(f) => {
-            let src = session::find(f, None)?;
-            if src.repo_name != repo_ref.name {
-                bail!(m::from_other_repo(&src.repo_name));
-            }
-            src.branch
-        }
+        Some(f) => match session::find(f, Some(&repo_ref.name)) {
+            Ok(src) => src.branch,
+            Err(e) => match session::find(f, None) {
+                Ok(other) => bail!(m::from_other_repo(&other.repo_name)),
+                Err(_) => return Err(e),
+            },
+        },
         None => repo_ref.base.clone(),
     };
 
@@ -147,6 +216,7 @@ pub fn create_session(
         cmd: cmd.clone(),
         tmux: tmux_name.clone(),
         created_unix: krill_core::now_unix(),
+        flow,
     };
 
     let spawn = || -> Result<()> {
@@ -192,6 +262,7 @@ pub fn ls() -> Result<()> {
         name: String,
         repo: String,
         agent: String,
+        flow: String,
         state: String,
         last: String,
         diff: String,
@@ -219,6 +290,11 @@ pub fn ls() -> Result<()> {
             name: m.name.clone(),
             repo: m.repo_name.clone(),
             agent: m.agent.clone(),
+            flow: m
+                .flow
+                .as_ref()
+                .map(|f| format!("{}:{}", f.flow, f.stage))
+                .unwrap_or_else(|| "-".into()),
             state: if attached { format!("{state}+⌨") } else { state },
             last,
             diff,
@@ -234,14 +310,19 @@ pub fn ls() -> Result<()> {
     let sw = w(|r| r.state.len(), 5);
     let lw = w(|r| r.last.len(), 4);
 
+    // The FLOW column only appears once a flow session exists.
+    let show_flow = rows.iter().any(|r| r.flow != "-");
+    let fw = w(|r| r.flow.len(), 4);
+    let flow_cell = |s: &str| if show_flow { format!("{s:<fw$}  ") } else { String::new() };
+
     println!(
-        "{DIM}  {:<nw$}  {:<rw$}  {:<aw$}  {:<sw$}  {:<lw$}  {}{RESET}",
-        "NAME", "REPO", "AGENT", "STATE", "LAST", "DIFF"
+        "{DIM}  {:<nw$}  {:<rw$}  {:<aw$}  {}{:<sw$}  {:<lw$}  {}{RESET}",
+        "NAME", "REPO", "AGENT", flow_cell("FLOW"), "STATE", "LAST", "DIFF"
     );
     for r in rows {
         println!(
-            "{} {:<nw$}  {:<rw$}  {:<aw$}  {:<sw$}  {:<lw$}  {}",
-            r.dot, r.name, r.repo, r.agent, r.state, r.last, r.diff
+            "{} {:<nw$}  {:<rw$}  {:<aw$}  {}{:<sw$}  {:<lw$}  {}",
+            r.dot, r.name, r.repo, r.agent, flow_cell(&r.flow), r.state, r.last, r.diff
         );
     }
     Ok(())
@@ -460,11 +541,20 @@ pub fn hook(state: &str, id: &str) -> Result<()> {
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut sink);
     session::write_hook_state(id, hs)?;
 
-    if let Some(topic) = Config::load().ok().and_then(|c| c.ntfy_topic) {
-        let body = match hs {
+    let config = Config::load().ok();
+
+    // Flow chain (M5a): Done on a flow-member session spawns the next
+    // stage. The chain result replaces the generic ntfy body.
+    let chain_note = match (&config, hs) {
+        (Some(cfg), krill_core::session::HookState::Done) => advance_flow(cfg, id),
+        _ => None,
+    };
+
+    if let Some(topic) = config.and_then(|c| c.ntfy_topic) {
+        let body = chain_note.unwrap_or_else(|| match hs {
             krill_core::session::HookState::NeedsYou => m::ntfy_needs_you(id),
             krill_core::session::HookState::Done => m::ntfy_done(id),
-        };
+        });
         // Best-effort, delegated to curl (principle 1), fire-and-forget
         // — a hook must never block or fail the agent on network issues.
         let _ = Command::new("curl")
@@ -474,6 +564,48 @@ pub fn hook(state: &str, id: &str) -> Result<()> {
             .spawn();
     }
     Ok(())
+}
+
+/// Advance a flow chain after a Done hook. Never fails the hook: spawn
+/// errors are reported (stderr + ntfy body) and swallowed. Returns the
+/// ntfy body describing what the chain did, if it did anything.
+fn advance_flow(config: &Config, id: &str) -> Option<String> {
+    let meta = session::find_by_id(id).ok()?;
+    let fr = meta.flow.clone()?;
+    let taken: Vec<String> = session::load_all()
+        .ok()?
+        .into_iter()
+        .filter(|m| m.repo_name == meta.repo_name)
+        .map(|m| m.name)
+        .collect();
+    match session::flow_next(&config.flows, &fr, &taken) {
+        FlowNext::Spawn { stage_no, stage, name } => {
+            let total = config.flows[&fr.flow].len();
+            let prompt = krill_core::config::stage_prompt(stage.m.as_deref(), &fr.goal);
+            let next_fr = FlowRef { stage: stage_no, ..fr.clone() };
+            match create_session_full(
+                &name,
+                stage.agent.as_deref(),
+                None,
+                prompt.as_deref(),
+                Some(&meta.name),
+                Some(&meta.repo_path), // never resolve the repo from the worktree cwd
+                Some(next_fr),
+            ) {
+                Ok(next) => Some(m::ntfy_flow_next(&fr.flow, stage_no, total, &next.name, &next.agent)),
+                Err(e) => {
+                    eprintln!("krill: {e}");
+                    Some(m::ntfy_flow_spawn_failed(&fr.flow, &name, &e.to_string()))
+                }
+            }
+        }
+        FlowNext::End => Some(m::ntfy_flow_done(&fr.flow, &meta.name)),
+        FlowNext::Exists => None, // Stop fires every turn — nothing new to do
+        FlowNext::UnknownFlow => {
+            eprintln!("krill: {}", m::flow_unknown(&fr.flow, &flow_names(config)));
+            None
+        }
+    }
 }
 
 /// Bare topics go to ntfy.sh; anything with a scheme is used verbatim
