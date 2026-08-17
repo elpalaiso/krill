@@ -1,4 +1,8 @@
 //! M2a: `krill serve` — read-only web UI (session cards + live preview).
+//! M2b: interactive — WebSocket terminal (xterm.js, read + input),
+//! vendored assets, `--bind tailscale`. Web view is fixed at 80×24 and
+//! input is meant to be short (§13 — tmux resizes to the smallest
+//! client, so the web stays a viewer first).
 //! Design doc §8.2. The page is a single embedded HTML file (vanilla JS,
 //! no CDN — a tailnet can be offline); state is rebuilt per request from
 //! tmux + meta files, so the server holds nothing and can die freely.
@@ -8,9 +12,10 @@
 //! (`?token=` or `Authorization: Bearer`).
 
 use crate::msg as m;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Html;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use krill_core::error::{Context, Result};
@@ -19,9 +24,14 @@ use krill_core::{bail, git, tmux};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
+// Vendored from the @xterm/xterm npm package (MIT) — no CDN (§8).
+const XTERM_JS: &str = include_str!("../web/assets/xterm.js");
+const XTERM_CSS: &str = include_str!("../web/assets/xterm.css");
 
 #[derive(Clone)]
 struct Srv {
@@ -77,8 +87,11 @@ pub fn run(bind: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr = SocketAddr::new(ip, port);
     let app = Router::new()
         .route("/", get(index))
+        .route("/assets/xterm.js", get(asset_js))
+        .route("/assets/xterm.css", get(asset_css))
         .route("/api/sessions", get(api_sessions))
         .route("/api/preview/{repo}/{name}", get(api_preview))
+        .route("/ws/{repo}/{name}", get(ws_upgrade))
         .with_state(Arc::new(Srv { token }));
 
     let rt = tokio::runtime::Runtime::new().context(m::serve_start_failed())?;
@@ -101,6 +114,109 @@ async fn index(
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(Html(INDEX_HTML))
+}
+
+// Library assets carry no session data — served without auth so the
+// page's <script>/<link> tags don't need the token appended.
+async fn asset_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/javascript")], XTERM_JS)
+}
+
+async fn asset_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css")], XTERM_CSS)
+}
+
+/// capture-pane text uses bare \n; a terminal needs \r\n.
+fn crlf(s: &str) -> String {
+    s.replace('\n', "\r\n")
+}
+
+/// Read the pipe-pane log from `offset`, capped per tick. Raw bytes —
+/// a chunk may split a UTF-8 sequence, hence binary WS frames.
+fn read_from(path: &std::path::Path, offset: u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    if f.seek(SeekFrom::Start(offset)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(256 * 1024).read_to_end(&mut buf);
+    buf
+}
+
+async fn ws_upgrade(
+    State(srv): State<Arc<Srv>>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> std::result::Result<Response, StatusCode> {
+    if !authed(&srv, &q, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let (tmux_name, log) = tokio::task::spawn_blocking(move || {
+        let meta = session::find(&name, Some(&repo)).map_err(|_| StatusCode::NOT_FOUND)?;
+        if !tmux::has(&meta.tmux) {
+            return Err(StatusCode::GONE);
+        }
+        let log = meta.log_path().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok((meta.tmux, log))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    Ok(ws.on_upgrade(move |socket| ws_session(socket, tmux_name, log)))
+}
+
+/// One live terminal: current screen first, then follow the pipe-pane
+/// log for new output; browser keystrokes go back via send-keys -l.
+async fn ws_session(mut socket: WebSocket, tmux_name: String, log: PathBuf) {
+    let tn = tmux_name.clone();
+    if let Ok(Ok(snap)) = tokio::task::spawn_blocking(move || tmux::capture_pane_ansi(&tn)).await {
+        if socket.send(Message::Text((crlf(&snap) + "\r\n").into())).await.is_err() {
+            return;
+        }
+    }
+    let mut offset = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let mut poll = tokio::time::interval(Duration::from_millis(250));
+    let mut ticks: u32 = 0;
+    loop {
+        tokio::select! {
+            _ = poll.tick() => {
+                let l = log.clone();
+                let chunk = tokio::task::spawn_blocking(move || read_from(&l, offset))
+                    .await
+                    .unwrap_or_default();
+                if !chunk.is_empty() {
+                    offset += chunk.len() as u64;
+                    if socket.send(Message::Binary(chunk.into())).await.is_err() {
+                        break;
+                    }
+                }
+                ticks += 1;
+                if ticks % 8 == 0 { // ~2s: still alive?
+                    let tn = tmux_name.clone();
+                    let alive = tokio::task::spawn_blocking(move || tmux::has(&tn))
+                        .await
+                        .unwrap_or(false);
+                    if !alive {
+                        let _ = socket.send(Message::Text("\r\n[dead]\r\n".into())).await;
+                        break;
+                    }
+                }
+            }
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Text(d))) => {
+                    let tn = tmux_name.clone();
+                    let _ = tokio::task::spawn_blocking(move || tmux::send_raw(&tn, d.as_str()))
+                        .await;
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => {}
+            }
+        }
+    }
 }
 
 async fn api_sessions(
@@ -197,7 +313,29 @@ mod tests {
     fn index_html_is_self_contained() {
         // Design §8: no CDN dependencies — a tailnet can be offline.
         assert!(INDEX_HTML.contains("<html"));
+        assert!(INDEX_HTML.contains("/assets/xterm.js")); // vendored, not CDN
         assert!(!INDEX_HTML.contains("http://cdn"));
         assert!(!INDEX_HTML.contains("https://"));
+        assert!(XTERM_JS.len() > 100_000); // the real library, not a stub
+        assert!(XTERM_CSS.contains("xterm"));
+    }
+
+    #[test]
+    fn crlf_converts_bare_newlines() {
+        assert_eq!(crlf("a\nb\n"), "a\r\nb\r\n");
+        assert_eq!(crlf("no-newline"), "no-newline");
+    }
+
+    #[test]
+    fn read_from_respects_offset_and_missing_files() {
+        let dir = std::env::temp_dir().join(format!("krill-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("log");
+        std::fs::write(&f, b"hello world").unwrap();
+        assert_eq!(read_from(&f, 0), b"hello world");
+        assert_eq!(read_from(&f, 6), b"world");
+        assert_eq!(read_from(&f, 100), b"");
+        assert_eq!(read_from(&dir.join("missing"), 0), b"");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

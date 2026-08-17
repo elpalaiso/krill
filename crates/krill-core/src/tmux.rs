@@ -63,6 +63,13 @@ pub fn send_line(name: &str, line: &str) -> Result<()> {
     ok(&["send-keys", "-t", &t, "Enter"]).map(|_| ())
 }
 
+/// Forward raw input (keystrokes, escape sequences) into the pane.
+/// `-l` sends the bytes literally instead of interpreting key names —
+/// the M2b web terminal feeds xterm.js onData through this.
+pub fn send_raw(name: &str, data: &str) -> Result<()> {
+    ok(&["send-keys", "-t", &pane_target(name), "-l", "--", data]).map(|_| ())
+}
+
 /// Stream all pane output into a log file (append).
 pub fn pipe_to_log(name: &str, log: &Path) -> Result<()> {
     let cmd = format!("cat >> {}", crate::shell_quote(&log.to_string_lossy()));
