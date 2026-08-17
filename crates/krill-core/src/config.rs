@@ -2,8 +2,9 @@
 //! string values, comments) — enough for this file's shape. Swap in the
 //! real `toml` crate when other deps arrive (M1+).
 
-use crate::bail;
 use crate::error::{Context, Result};
+use crate::i18n::Lang;
+use crate::{bail, msg};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -24,14 +25,18 @@ pub struct RepoCfg {
 
 #[derive(Debug, Clone, Default)]
 pub struct Config {
+    /// Message language override ("ko" | "en"); see i18n.rs for priority.
+    pub lang: Option<String>,
     pub default_agent: Option<String>,
     pub agents: BTreeMap<String, AgentCfg>,
     pub repos: BTreeMap<String, RepoCfg>,
 }
 
-pub const DEFAULT_CONFIG: &str = r#"# krill config
+pub const DEFAULT_CONFIG_KO: &str = r#"# krill config
 # 에이전트는 stdin/stdout을 가진 CLI라면 무엇이든 등록할 수 있습니다.
 # {prompt} 자리에 `krill new -m "..."`의 지시문이 (따옴표 처리되어) 들어갑니다.
+
+# lang = "ko"             # 메시지 언어: "ko" | "en" (기본: $LANG 자동 감지)
 
 default_agent = "claude"
 
@@ -53,6 +58,41 @@ cmd = ""                  # 빈 cmd = 그냥 셸 (테스트용)
 # base = "main"
 "#;
 
+pub const DEFAULT_CONFIG_EN: &str = r#"# krill config
+# Any CLI with stdin/stdout can be registered as an agent.
+# {prompt} is replaced with the (shell-quoted) message from `krill new -m "..."`.
+
+# lang = "en"             # message language: "ko" | "en" (default: auto-detect from $LANG)
+
+default_agent = "claude"
+
+[agents.claude]
+cmd = "claude {prompt}"
+# hooks = "claude-code"   # M3: auto-inject status hooks
+
+[agents.codex]
+cmd = "codex {prompt}"
+
+[agents.gemini]
+cmd = "gemini {prompt}"
+
+[agents.shell]
+cmd = ""                  # empty cmd = plain shell (for testing)
+
+# [repos.myapp]
+# path = "~/work/myapp"
+# base = "main"
+"#;
+
+/// The default config template in the current language. Both variants
+/// parse to the same semantic Config; only comments differ.
+pub fn default_config() -> &'static str {
+    match crate::i18n::lang() {
+        Lang::Ko => DEFAULT_CONFIG_KO,
+        Lang::En => DEFAULT_CONFIG_EN,
+    }
+}
+
 impl Config {
     /// Load the config file, or fall back to built-in defaults if it
     /// doesn't exist yet (`krill init` writes it to disk).
@@ -60,10 +100,10 @@ impl Config {
         let path = crate::config_path()?;
         if path.exists() {
             let raw = std::fs::read_to_string(&path)
-                .with_context(|| format!("설정 파일을 읽을 수 없습니다: {}", path.display()))?;
-            parse(&raw).with_context(|| format!("설정 파일 파싱 실패: {}", path.display()))
+                .with_context(|| msg::config_read_failed(&path.display().to_string()))?;
+            parse(&raw).with_context(|| msg::config_parse_failed(&path.display().to_string()))
         } else {
-            parse(DEFAULT_CONFIG).context("내장 기본 설정 파싱 실패(버그)")
+            parse(default_config()).context(msg::builtin_config_broken())
         }
     }
 
@@ -77,7 +117,7 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, DEFAULT_CONFIG)?;
+        std::fs::write(&path, default_config())?;
         Ok((path, true))
     }
 
@@ -88,22 +128,18 @@ impl Config {
             None => match &self.default_agent {
                 Some(d) => d.clone(),
                 None if self.agents.len() == 1 => self.agents.keys().next().unwrap().clone(),
-                None => bail!("에이전트를 지정하세요 (-a). 등록된 에이전트: {}", self.agent_names()),
+                None => bail!(msg::agent_required(&self.agent_names())),
             },
         };
         match self.agents.get(&name) {
             Some(cfg) => Ok((name, cfg.clone())),
-            None => bail!(
-                "'{}' 에이전트가 설정에 없습니다. 등록된 에이전트: {}",
-                name,
-                self.agent_names()
-            ),
+            None => bail!(msg::agent_unknown(&name, &self.agent_names())),
         }
     }
 
     fn agent_names(&self) -> String {
         if self.agents.is_empty() {
-            "(없음 — `krill init` 후 config.toml을 편집하세요)".into()
+            msg::agent_none_registered()
         } else {
             self.agents.keys().cloned().collect::<Vec<_>>().join(", ")
         }
@@ -139,24 +175,25 @@ fn parse(raw: &str) -> Result<Config> {
         }
         if let Some(rest) = line.strip_prefix('[') {
             let Some(name) = rest.strip_suffix(']') else {
-                bail!("{lineno}행: 섹션 헤더가 ]로 끝나지 않습니다");
+                bail!(msg::cfg_section_unterminated(lineno));
             };
             section = name.trim().to_string();
             continue;
         }
         let Some((key, rawval)) = line.split_once('=') else {
-            bail!("{lineno}행: `key = value` 형식이 아닙니다: {line}");
+            bail!(msg::cfg_not_key_value(lineno, line));
         };
         let key = key.trim();
         let value = parse_value(rawval.trim())
-            .with_context(|| format!("{lineno}행: 값 파싱 실패"))?;
+            .with_context(|| msg::cfg_value_parse_failed(lineno))?;
 
         match section.as_str() {
             "" => {
-                if key == "default_agent" {
-                    config.default_agent = Some(value);
+                match key {
+                    "default_agent" => config.default_agent = Some(value),
+                    "lang" => config.lang = Some(value),
+                    _ => {} // unknown top-level keys are ignored (forward compat)
                 }
-                // unknown top-level keys are ignored (forward compat)
             }
             s if s.starts_with("agents.") => {
                 let name = s.trim_start_matches("agents.").to_string();
@@ -185,7 +222,7 @@ fn parse(raw: &str) -> Result<Config> {
 
     for (name, rc) in &config.repos {
         if rc.path.as_os_str().is_empty() {
-            bail!("[repos.{name}]에 path가 없습니다");
+            bail!(msg::cfg_repo_missing_path(name));
         }
     }
     Ok(config)
@@ -210,18 +247,18 @@ fn parse_value(raw: &str) -> Result<String> {
                             out.push('\\');
                             out.push(other);
                         }
-                        None => bail!("문자열이 \\ 로 끝났습니다"),
+                        None => bail!(msg::cfg_trailing_backslash()),
                     },
                     _ => out.push(c),
                 }
             }
-            bail!("닫는 따옴표(\")가 없습니다")
+            bail!(msg::cfg_unclosed_dquote())
         }
         Some('\'') => {
             let rest: String = chars.collect();
             match rest.split_once('\'') {
                 Some((inner, _)) => Ok(inner.to_string()),
-                None => bail!("닫는 따옴표(')가 없습니다"),
+                None => bail!(msg::cfg_unclosed_squote()),
             }
         }
         _ => {
@@ -237,20 +274,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_default_template() {
-        let c = parse(DEFAULT_CONFIG).unwrap();
-        assert_eq!(c.default_agent.as_deref(), Some("claude"));
-        assert_eq!(c.agents["claude"].cmd, "claude {prompt}");
-        assert!(c.agents["claude"].hooks.is_none()); // commented out
-        assert_eq!(c.agents["shell"].cmd, "");
-        assert!(c.agents.contains_key("codex") && c.agents.contains_key("gemini"));
-        assert!(c.repos.is_empty());
+    fn parses_both_default_templates_identically() {
+        for tpl in [DEFAULT_CONFIG_KO, DEFAULT_CONFIG_EN] {
+            let c = parse(tpl).unwrap();
+            assert_eq!(c.default_agent.as_deref(), Some("claude"));
+            assert_eq!(c.agents["claude"].cmd, "claude {prompt}");
+            assert!(c.agents["claude"].hooks.is_none()); // commented out
+            assert_eq!(c.agents["shell"].cmd, "");
+            assert!(c.agents.contains_key("codex") && c.agents.contains_key("gemini"));
+            assert!(c.repos.is_empty());
+            assert!(c.lang.is_none()); // commented out
+        }
     }
 
     #[test]
     fn parses_sections_keys_and_value_styles() {
         let c = parse(
             r##"
+lang = "ko"
 default_agent = "a"
 future_key = "ignored"
 
@@ -271,6 +312,7 @@ port = 7777
 "##,
         )
         .unwrap();
+        assert_eq!(c.lang.as_deref(), Some("ko"));
         assert_eq!(c.default_agent.as_deref(), Some("a"));
         assert_eq!(c.agents["a"].hooks.as_deref(), Some("claude-code"));
         assert_eq!(c.agents["b"].cmd, r#"literal "quoted""#);

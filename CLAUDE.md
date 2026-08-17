@@ -7,6 +7,8 @@ Orca/Xirp의 경량 대안. **전체 설계는 docs/DESIGN.md — 작업 전에 
 
 M0 완료: `new / ls / attach / diff / rm` + `--from` 릴레이 핸드오프. 순수 std로 외부
 크레이트 0개인데 이것은 의도된 설계다(릴리스 바이너리 515KB). 실기기 검증 완료.
+이후 추가: 코어 유닛 테스트 + 실제 git 통합 테스트(`cargo test`), CLI 메시지
+ko/en i18n(`messages!` 카탈로그, 로케일 자동 감지).
 
 다음 마일스톤 순서: M1 TUI(ratatui) → M2 `krill serve`(웹 UI + Tailscale 원격) →
 M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → M5 듀엣(턴제
@@ -32,10 +34,15 @@ M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → 
 
 ## 빌드와 테스트
 
-`cargo build` → `target/debug/krill`. 수동 검증 시나리오: 더미 git 리포에서
-`-a shell` 에이전트로 new → (tmux send-keys로 작업 시뮬레이션) → ls → diff →
-`--from` 릴레이 → rm 후 tmux/worktree/브랜치 잔여물 0 확인. 자동 테스트는 TODO
-(core의 kv/config 파서부터 유닛 테스트 붙이는 게 좋은 시작점).
+`cargo build` → `target/debug/krill`. `cargo test` = 유닛 테스트(kv/config
+파서, 세션 스토어, 헬스 판정, i18n, 플래그 파서) + 실제 git을 쓰는 통합 테스트
+(crates/krill-core/tests/git_integration.rs). 테스트는 env를 변경하지 않는다 —
+env 의존 로직은 순수 함수 씸(`config_path_in`, `classify`, `find_among` 등)으로
+분리해 테스트한다. 이 패턴을 유지할 것.
+
+수동 검증 시나리오: 더미 git 리포에서 `-a shell` 에이전트로 new → (tmux
+send-keys로 작업 시뮬레이션) → ls → diff → `--from` 릴레이 → rm 후
+tmux/worktree/브랜치 잔여물 0 확인.
 
 ## 주의할 함정
 
@@ -43,4 +50,8 @@ M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → 
   pipe-pane, display-message)은 `=name:`(끝 콜론 필수). 실제로 밟았던 버그다.
 - `krill new` 실패 시 롤백에서 tmux kill + worktree remove + branch delete를
   모두 해야 잔여물이 안 남는다 (commands.rs의 spawn 클로저 패턴 유지).
-- 에러 메시지는 한국어, 코드 주석은 한/영 혼용 OK.
+- **사용자 노출 문자열은 전부 `messages!` 카탈로그를 거친다** (core:
+  `krill-core/src/msg.rs`, bin: `krill/src/msg.rs`). ko/en 둘 다 매크로가
+  컴파일 타임에 강제하므로 하드코딩 금지. 언어 우선순위: `KRILL_LANG` >
+  config `lang` > `LC_ALL`/`LC_MESSAGES`/`LANG` > en (i18n.rs). 지원 언어는
+  ko/en 두 개만. 코드 주석은 한/영 혼용 OK.

@@ -1,5 +1,5 @@
-use crate::bail;
 use crate::error::{Context, Error, Result};
+use crate::{bail, msg};
 use std::path::Path;
 use std::process::Command;
 
@@ -7,17 +7,16 @@ fn tmux(args: &[&str]) -> Result<std::process::Output> {
     Command::new("tmux")
         .args(args)
         .output()
-        .context("tmux를 실행할 수 없습니다 (설치돼 있나요?)")
+        .context(msg::tmux_not_found())
 }
 
 fn ok(args: &[&str]) -> Result<String> {
     let out = tmux(args)?;
     if !out.status.success() {
-        bail!(
-            "tmux {} 실패: {}",
-            args.join(" "),
+        bail!(msg::tmux_cmd_failed(
+            &args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
-        );
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -93,7 +92,7 @@ pub fn attach_exec(name: &str) -> Result<()> {
     } else {
         Command::new("tmux").args(["attach-session", "-t", &t]).exec()
     };
-    Err(Error::msg(format!("tmux attach 실패: {err}")))
+    Err(Error::msg(msg::tmux_attach_failed(&err.to_string())))
 }
 
 #[cfg(test)]

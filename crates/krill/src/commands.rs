@@ -1,3 +1,4 @@
+use crate::msg as m;
 use krill_core::bail;
 use krill_core::config::Config;
 use krill_core::error::{Context, Result};
@@ -27,10 +28,10 @@ pub fn init() -> Result<()> {
     std::fs::create_dir_all(krill_core::logs_dir()?)?;
     std::fs::create_dir_all(krill_core::worktrees_dir()?)?;
     if created {
-        println!("설정 파일 생성: {}", path.display());
-        println!("에이전트와 리포를 편집한 뒤 `krill new <이름>`으로 시작하세요.");
+        println!("{}", m::init_created(&path.display().to_string()));
+        println!("{}", m::init_hint());
     } else {
-        println!("설정 파일이 이미 있습니다: {}", path.display());
+        println!("{}", m::init_exists(&path.display().to_string()));
     }
     Ok(())
 }
@@ -43,7 +44,7 @@ pub fn new(
     from: Option<&str>,
 ) -> Result<()> {
     if !krill_core::valid_name(name) {
-        bail!("세션 이름은 영숫자/대시/언더스코어 64자 이내여야 합니다: '{name}'");
+        bail!(m::invalid_session_name(name));
     }
     let config = Config::load()?;
     let cwd = std::env::current_dir()?;
@@ -54,10 +55,7 @@ pub fn new(
         .iter()
         .any(|m| m.name == name && m.repo_name == repo_ref.name)
     {
-        bail!(
-            "'{name}' 세션이 이미 있습니다 (repo: {}). 다른 이름을 쓰거나 먼저 `krill rm {name}` 하세요.",
-            repo_ref.name
-        );
+        bail!(m::session_exists(name, &repo_ref.name));
     }
 
     // Relay handoff (--from): branch off another session's work instead of base.
@@ -65,7 +63,7 @@ pub fn new(
         Some(f) => {
             let src = session::find(f, None)?;
             if src.repo_name != repo_ref.name {
-                bail!("--from 세션이 다른 리포에 있습니다: {}", src.repo_name);
+                bail!(m::from_other_repo(&src.repo_name));
             }
             src.branch
         }
@@ -75,14 +73,14 @@ pub fn new(
     let branch = format!("krill/{name}");
     let worktree = krill_core::worktrees_dir()?.join(&repo_ref.name).join(name);
     if worktree.exists() {
-        bail!("worktree 경로가 이미 존재합니다: {}", worktree.display());
+        bail!(m::worktree_exists(&worktree.display().to_string()));
     }
     if let Some(parent) = worktree.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     git::worktree_add(&repo_ref.path, &worktree, &branch, &base)
-        .with_context(|| format!("worktree 생성 실패 (base: {base})"))?;
+        .with_context(|| m::worktree_create_failed(&base))?;
 
     // Build the agent command line.
     let cmd = match message {
@@ -115,7 +113,7 @@ pub fn new(
 
     let spawn = || -> Result<()> {
         if tmux::has(&tmux_name) {
-            bail!("tmux 세션 이름이 이미 사용 중입니다: {tmux_name}");
+            bail!(m::tmux_name_taken(&tmux_name));
         }
         tmux::new_session(&tmux_name, &worktree)?;
         let log = meta.log_path()?;
@@ -140,21 +138,21 @@ pub fn new(
     }
     meta.save()?;
 
-    println!("{BOLD}{name}{RESET} 세션 시작");
+    println!("{BOLD}{name}{RESET} {}", m::session_started());
     println!("  repo     {} ({})", repo_ref.name, repo_ref.path.display());
     println!("  branch   {branch} (base: {base})");
     println!("  worktree {}", worktree.display());
-    println!("  agent    {agent_name}{}", if cmd.is_empty() { " (셸만)" } else { "" });
+    println!("  agent    {agent_name}{}", if cmd.is_empty() { m::shell_only() } else { String::new() });
     println!();
-    println!("접속: {BOLD}krill attach {name}{RESET}   (분리: Ctrl-b d)");
+    println!("{}", m::attach_hint(&format!("{BOLD}krill attach {name}{RESET}")));
     Ok(())
 }
 
 pub fn ls() -> Result<()> {
     let metas = session::load_all()?;
     if metas.is_empty() {
-        println!("세션이 없습니다.");
-        println!("시작하기: krill new <이름> -m \"지시문\"   (설정: krill init)");
+        println!("{}", m::ls_empty());
+        println!("{}", m::ls_hint());
         return Ok(());
     }
     let live = tmux::server_sessions();
@@ -220,10 +218,7 @@ pub fn ls() -> Result<()> {
 pub fn attach(name: &str, repo: Option<&str>) -> Result<()> {
     let meta = session::find(name, repo)?;
     if !tmux::has(&meta.tmux) {
-        bail!(
-            "'{}' 세션의 tmux가 죽어 있습니다. `krill rm {}`로 정리 후 다시 만드세요.",
-            meta.name, meta.name
-        );
+        bail!(m::attach_dead(&meta.name));
     }
     tmux::attach_exec(&meta.tmux)
 }
@@ -231,7 +226,7 @@ pub fn attach(name: &str, repo: Option<&str>) -> Result<()> {
 pub fn diff(name: &str, repo: Option<&str>, stat: bool) -> Result<()> {
     let meta = session::find(name, repo)?;
     if !meta.worktree.exists() {
-        bail!("worktree가 없습니다: {}", meta.worktree.display());
+        bail!(m::worktree_missing(&meta.worktree.display().to_string()));
     }
     // Diff the working tree against base — includes uncommitted changes,
     // which agents frequently leave behind.
@@ -247,9 +242,9 @@ pub fn diff(name: &str, repo: Option<&str>, stat: bool) -> Result<()> {
     let status = Command::new("git")
         .args(&args)
         .status()
-        .context("git 실행 실패")?;
+        .context(m::git_exec_failed())?;
     if !status.success() {
-        bail!("git diff 종료 코드: {status}");
+        bail!(m::git_diff_exit(&status.to_string()));
     }
     Ok(())
 }
@@ -258,15 +253,12 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
     let meta = session::find(name, repo)?;
 
     if !force {
-        eprint!(
-            "'{}' 세션과 worktree, 브랜치 {}을(를) 삭제합니다. 계속? [y/N] ",
-            meta.name, meta.branch
-        );
+        eprint!("{}", m::rm_confirm(&meta.name, &meta.branch));
         std::io::stderr().flush().ok();
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line).context("입력 읽기 실패")?;
+        std::io::stdin().read_line(&mut line).context(m::stdin_read_failed())?;
         if !matches!(line.trim(), "y" | "Y") {
-            println!("취소했습니다.");
+            println!("{}", m::rm_cancelled());
             return Ok(());
         }
     }
@@ -276,22 +268,16 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
     }
     if meta.worktree.exists() {
         if let Err(e) = git::worktree_remove(&meta.repo_path, &meta.worktree, force) {
-            bail!(
-                "worktree 제거 실패 — 커밋 안 된 변경이 있는 것 같습니다.\n  {e}\n강제 삭제: krill rm {} --force",
-                meta.name
-            );
+            bail!(m::rm_worktree_failed(&e.to_string(), &meta.name));
         }
     }
     let _ = git::run(&meta.repo_path, &["worktree", "prune"]);
     if let Err(e) = git::branch_delete(&meta.repo_path, &meta.branch, force) {
-        eprintln!("{DIM}브랜치는 남겨둡니다 (머지되지 않음): {e}{RESET}");
-        eprintln!(
-            "{DIM}브랜치까지 지우려면: krill rm --force 또는 git branch -D {}{RESET}",
-            meta.branch
-        );
+        eprintln!("{DIM}{}{RESET}", m::rm_branch_kept(&e.to_string()));
+        eprintln!("{DIM}{}{RESET}", m::rm_branch_hint(&meta.branch));
     }
     meta.delete()?;
-    println!("정리 완료: {}", meta.name);
+    println!("{}", m::rm_done(&meta.name));
     Ok(())
 }
 

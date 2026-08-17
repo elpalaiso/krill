@@ -9,7 +9,9 @@
 pub mod config;
 pub mod error;
 pub mod git;
+pub mod i18n;
 pub mod kv;
+pub mod msg;
 pub mod session;
 pub mod tmux;
 
@@ -20,7 +22,7 @@ use std::path::{Path, PathBuf};
 fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .context("HOME 환경변수가 없습니다")
+        .context(msg::home_missing())
 }
 
 /// Pure join logic behind `config_path`, separated so tests don't need

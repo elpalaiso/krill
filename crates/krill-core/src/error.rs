@@ -28,23 +28,28 @@ impl From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// `bail!("...")` — return early with a formatted error.
+/// `bail!("fmt", args…)` or `bail!(msg_expr)` — return early with an error.
+/// The expression form takes anything `Into<String>` (e.g. `msg::` catalog
+/// calls).
 #[macro_export]
 macro_rules! bail {
-    ($($t:tt)*) => {
-        return Err($crate::error::Error::msg(format!($($t)*)))
+    ($fmt:literal $(, $($arg:tt)+)?) => {
+        return Err($crate::error::Error::msg(format!($fmt $(, $($arg)+)?)))
+    };
+    ($msg:expr) => {
+        return Err($crate::error::Error::msg($msg))
     };
 }
 
 /// `.context("...")` / `.with_context(|| ...)` on Result and Option.
 pub trait Context<T> {
-    fn context(self, msg: &str) -> Result<T>;
+    fn context(self, msg: impl Into<String>) -> Result<T>;
     fn with_context(self, f: impl FnOnce() -> String) -> Result<T>;
 }
 
 impl<T, E: fmt::Display> Context<T> for std::result::Result<T, E> {
-    fn context(self, msg: &str) -> Result<T> {
-        self.map_err(|e| Error(format!("{msg}: {e}")))
+    fn context(self, msg: impl Into<String>) -> Result<T> {
+        self.map_err(|e| Error(format!("{}: {e}", msg.into())))
     }
     fn with_context(self, f: impl FnOnce() -> String) -> Result<T> {
         self.map_err(|e| Error(format!("{}: {e}", f())))
@@ -52,7 +57,7 @@ impl<T, E: fmt::Display> Context<T> for std::result::Result<T, E> {
 }
 
 impl<T> Context<T> for Option<T> {
-    fn context(self, msg: &str) -> Result<T> {
+    fn context(self, msg: impl Into<String>) -> Result<T> {
         self.ok_or_else(|| Error(msg.into()))
     }
     fn with_context(self, f: impl FnOnce() -> String) -> Result<T> {
@@ -68,9 +73,14 @@ mod tests {
         crate::bail!("boom {}", 42)
     }
 
+    fn boom_expr() -> Result<()> {
+        crate::bail!(String::from("prebuilt"))
+    }
+
     #[test]
-    fn bail_formats() {
+    fn bail_formats_and_takes_expressions() {
         assert_eq!(boom().unwrap_err().to_string(), "boom 42");
+        assert_eq!(boom_expr().unwrap_err().to_string(), "prebuilt");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::error::{Context, Result};
-use crate::{bail, kv};
+use crate::{bail, kv, msg};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,7 @@ impl SessionMeta {
 
     fn from_map(m: &BTreeMap<String, String>) -> Result<SessionMeta> {
         let req = |k: &str| -> Result<String> {
-            m.get(k).cloned().with_context(|| format!("세션 메타에 '{k}' 필드가 없습니다"))
+            m.get(k).cloned().with_context(|| msg::meta_field_missing(k))
         };
         Ok(SessionMeta {
             name: req("name")?,
@@ -63,7 +63,7 @@ impl SessionMeta {
             tmux: req("tmux")?,
             created_unix: req("created_unix")?
                 .parse()
-                .context("created_unix 파싱 실패")?,
+                .context(msg::meta_created_parse_failed())?,
         })
     }
 
@@ -75,7 +75,7 @@ impl SessionMeta {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{}.kv", self.id()));
         kv::write_file(&path, &self.to_map())
-            .with_context(|| format!("세션 메타 저장 실패: {}", path.display()))
+            .with_context(|| msg::meta_save_failed(&path.display().to_string()))
     }
 
     pub fn delete(&self) -> Result<()> {
@@ -141,7 +141,10 @@ fn load_all_from(dir: &Path) -> Result<Vec<SessionMeta>> {
         if path.extension().is_some_and(|e| e == "kv") {
             match kv::read_file(&path).and_then(|m| SessionMeta::from_map(&m)) {
                 Ok(meta) => out.push(meta),
-                Err(e) => eprintln!("경고: 세션 메타 손상 무시 {} ({e})", path.display()),
+                Err(e) => eprintln!(
+                    "{}",
+                    msg::meta_corrupt_ignored(&path.display().to_string(), &e.to_string())
+                ),
             }
         }
     }
@@ -160,16 +163,16 @@ fn find_among(all: Vec<SessionMeta>, name: &str, repo: Option<&str>) -> Result<S
         .filter(|m| m.name == name && repo.map_or(true, |r| m.repo_name == r))
         .collect();
     match matches.len() {
-        0 => bail!("'{name}' 세션이 없습니다. `krill ls`로 확인하세요."),
+        0 => bail!(msg::session_not_found(name)),
         1 => Ok(matches.into_iter().next().unwrap()),
-        _ => bail!(
-            "'{name}' 세션이 여러 리포에 있습니다 ({}). -r <리포>로 지정하세요.",
-            matches
+        _ => bail!(msg::session_ambiguous(
+            name,
+            &matches
                 .iter()
                 .map(|m| m.repo_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        ),
+        )),
     }
 }
 

@@ -14,6 +14,17 @@ config 한 줄로 등록됩니다.
 
 git, tmux (macOS / Linux / WSL2)
 
+## 언어 (Language)
+
+CLI 메시지는 한국어/영어를 지원합니다. 기본은 로케일(`$LANG` 등) 자동 감지:
+
+```sh
+KRILL_LANG=en krill ls              # 1회성 강제
+```
+
+고정하려면 `~/.config/krill/config.toml`에 `lang = "ko"` (또는 `"en"`).
+우선순위: `KRILL_LANG` > config `lang` > `LC_ALL`/`LC_MESSAGES`/`LANG` > en.
+
 ## 빠른 시작
 
 ```sh
@@ -43,6 +54,7 @@ krill new review-login -a codex --from fix-login \
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | M0 | 코어 CLI: new / ls / attach / diff / rm, `--from` 릴레이 | ✅ |
+| M0.5 | 코어 유닛/통합 테스트, 메시지 ko/en i18n | ✅ |
 | M1 | TUI 대시보드 (ratatui), 상태 휴리스틱 | ⬜ |
 | M2 | `krill serve`: 웹 UI + Tailscale 원격 접속 | ⬜ |
 | M3 | Claude Code 훅 연동(NeedsYou 정확 감지), ntfy 푸시, merge/pr | ⬜ |

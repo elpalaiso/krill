@@ -1,5 +1,5 @@
-use crate::bail;
 use crate::config::{expand_tilde, Config};
+use crate::{bail, msg};
 use crate::error::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,13 +19,12 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
         .arg(dir)
         .args(args)
         .output()
-        .context("git을 실행할 수 없습니다 (설치돼 있나요?)")?;
+        .context(msg::git_not_found())?;
     if !out.status.success() {
-        bail!(
-            "git {} 실패: {}",
-            args.join(" "),
+        bail!(msg::git_cmd_failed(
+            &args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
-        );
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -54,25 +53,22 @@ pub fn detect_base(repo: &Path) -> String {
 pub fn resolve_repo(config: &Config, flag: Option<&str>, cwd: &Path) -> Result<RepoRef> {
     if let Some(name) = flag {
         let rc = config.repos.get(name).with_context(|| {
-            format!(
-                "'{}' 리포가 설정에 없습니다. 등록된 리포: {}",
-                name,
-                if config.repos.is_empty() {
-                    "(없음)".to_string()
-                } else {
-                    config.repos.keys().cloned().collect::<Vec<_>>().join(", ")
-                }
-            )
+            let repos = if config.repos.is_empty() {
+                msg::repo_none_registered()
+            } else {
+                config.repos.keys().cloned().collect::<Vec<_>>().join(", ")
+            };
+            msg::repo_unknown(name, &repos)
         })?;
         let path = expand_tilde(&rc.path);
         if toplevel(&path).is_none() {
-            bail!("리포 경로가 git 저장소가 아닙니다: {}", path.display());
+            bail!(msg::repo_path_not_git(&path.display().to_string()));
         }
         return Ok(RepoRef { name: name.into(), path, base: rc.base.clone() });
     }
 
     let Some(top) = toplevel(cwd) else {
-        bail!("git 리포 안이 아닙니다. 리포 안에서 실행하거나 -r <이름>으로 지정하세요.");
+        bail!(msg::not_in_repo());
     };
 
     // Is cwd's repo one of the configured ones?

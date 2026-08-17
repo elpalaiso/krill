@@ -1,6 +1,7 @@
 //! Tiny flag parser (M0 has no clap). Supports `-a val` / `--agent val`
 //! style; `--flag=val` is not supported yet.
 
+use crate::msg;
 use krill_core::bail;
 use krill_core::error::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +43,7 @@ pub fn parse(
             {
                 i += 1;
                 let Some(value) = args.get(i) else {
-                    bail!("{arg} 옵션에 값이 필요합니다");
+                    bail!(msg::opt_needs_value(arg));
                 };
                 opts.vals.insert(long, value.clone());
             } else if let Some((_, long)) = bool_specs
@@ -51,7 +52,7 @@ pub fn parse(
             {
                 opts.bools.insert(long);
             } else {
-                bail!("알 수 없는 옵션: {arg} (도움말: krill --help)");
+                bail!(msg::unknown_option(arg));
             }
         } else {
             opts.pos.push(arg.to_string());
