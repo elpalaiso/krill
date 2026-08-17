@@ -16,14 +16,15 @@ dirty 경고·y/f/N) + M1c 폴리시(/ 이름 필터, 색 미리보기 — captu
 ansi.rs의 SGR 파서로 렌더). M1 완료. commands.rs의 create_session/remove_session은
 무출력 코어라 CLI와 TUI가 공유한다.
 
-M2 진행: `krill serve` 웹 UI(serve.rs, 설계 DESIGN.md §8.2). M2a: 카드
-목록·미리보기 API + 토큰 인증(§7 규칙: non-loopback 바인드는 토큰 필수).
-M2b: WebSocket 터미널(xterm.js 5.5를 web/assets에 벤더링, 스냅샷 → 로그 tail
-스트림, 키입력은 send-keys -l) + `--bind tailscale`. tokio/axum/serde는
-바이너리 크레이트에만, 정적 자산은 include_str!(rust-embed 불필요).
-남은 M2c: 퀵 리플라이·diff 뷰.
+M2 완료(`--expose`만 M3~M4로 연기): `krill serve` 웹 UI(serve.rs, 설계
+DESIGN.md §8.2). M2a: 카드 목록·미리보기 API + 토큰 인증(§7 규칙:
+non-loopback 바인드는 토큰 필수). M2b: WebSocket 터미널(xterm.js 5.5를
+web/assets에 벤더링, 스냅샷 → 로그 tail 스트림, 키입력은 send-keys -l) +
+`--bind tailscale`. M2c: 퀵 리플라이 버튼(y⏎/n⏎/⏎/Esc/^C) + diff 뷰
+(/api/diff, 512KB 캡). tokio/axum/serde는 바이너리 크레이트에만, 정적
+자산은 include_str!(rust-embed 불필요).
 
-다음 마일스톤 순서: M2 마무리(M2b/c) →
+다음 마일스톤 순서:
 M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → M5 듀엣(턴제
 교차모델 리뷰, docs/DESIGN.md §12).
 

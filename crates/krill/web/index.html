@@ -37,6 +37,22 @@ h1 small { color: #7d8590; font-weight: normal; font-size: 13px; }
   flex: 1; min-height: 0; background: #0e1116; border: 1px solid #30363d;
   border-radius: 10px; padding: 8px; overflow: auto;
 }
+#quick { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+#quick button { min-width: 52px; }
+#diffview {
+  position: fixed; inset: 0; background: #0e1116; padding: 12px;
+  display: none; flex-direction: column; z-index: 10;
+}
+#diffview.open { display: flex; }
+#diffview pre {
+  flex: 1; overflow: auto; background: #161b22; border: 1px solid #30363d;
+  border-radius: 10px; padding: 12px;
+  font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre; 
+}
+.dadd { color: #3fb950; }
+.ddel { color: #f85149; }
+.dhunk { color: #58a6ff; }
 button {
   background: #21262d; color: #e6edf3; border: 1px solid #30363d;
   border-radius: 8px; padding: 6px 12px; font-size: 14px;
@@ -52,8 +68,18 @@ button {
     <button id="back">←</button>
     <span class="name" id="pv-title"></span>
     <span class="meta" id="pv-meta"></span>
+    <button id="diffbtn" style="margin-left:auto">diff</button>
   </header>
   <div id="term"></div>
+  <div id="quick"></div>
+</div>
+
+<div id="diffview">
+  <header style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <button id="diffback">←</button>
+    <span class="name" id="diff-title"></span>
+  </header>
+  <pre id="diff-text"></pre>
 </div>
 
 <script src="/assets/xterm.js"></script>
@@ -127,6 +153,52 @@ function closeTerm() {
 }
 
 document.getElementById('back').onclick = closeTerm;
+
+// Quick replies (§8.2): answer common agent prompts without typing.
+// Each button sends canned keys through the same WS as the keyboard.
+const QUICK = [
+  ['y ⏎', 'y\r'],
+  ['n ⏎', 'n\r'],
+  ['⏎', '\r'],
+  ['Esc', '\u001b'],
+  ['^C', '\u0003'],
+];
+const quickBar = document.getElementById('quick');
+for (const [label, keys] of QUICK) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.onclick = () => { if (ws && ws.readyState === 1) { ws.send(keys); term && term.focus(); } };
+  quickBar.appendChild(b);
+}
+
+// Diff view: worktree vs base, colored by line prefix.
+function renderDiff(text) {
+  const pre = document.getElementById('diff-text');
+  pre.textContent = '';
+  if (!text.trim()) { pre.textContent = '(clean)'; return; }
+  for (const line of text.split('\n')) {
+    const span = document.createElement('span');
+    if (line.startsWith('+') && !line.startsWith('+++')) span.className = 'dadd';
+    else if (line.startsWith('-') && !line.startsWith('---')) span.className = 'ddel';
+    else if (line.startsWith('@@')) span.className = 'dhunk';
+    span.textContent = line + '\n';
+    pre.appendChild(span);
+  }
+}
+
+document.getElementById('diffbtn').onclick = async () => {
+  if (!current) return;
+  document.getElementById('diff-title').textContent = `${current.name} · diff`;
+  document.getElementById('diffview').classList.add('open');
+  const url = `/api/diff/${encodeURIComponent(current.repo)}/${encodeURIComponent(current.name)}` + qs;
+  try {
+    const r = await fetch(url);
+    renderDiff(r.ok ? await r.text() : `(${r.status})`);
+  } catch (e) { renderDiff('(error)'); }
+};
+document.getElementById('diffback').onclick = () => {
+  document.getElementById('diffview').classList.remove('open');
+};
 
 refresh();
 setInterval(refresh, 2000);
