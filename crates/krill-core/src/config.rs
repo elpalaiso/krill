@@ -58,7 +58,7 @@ default_agent = "claude"
 
 [agents.claude]
 cmd = "claude {prompt}"
-# hooks = "claude-code"   # M3: 상태 훅 자동 주입
+hooks = "claude-code"     # NeedsYou/Done 상태 훅 자동 주입
 
 [agents.codex]
 cmd = "codex {prompt}"
@@ -84,7 +84,7 @@ default_agent = "claude"
 
 [agents.claude]
 cmd = "claude {prompt}"
-# hooks = "claude-code"   # M3: auto-inject status hooks
+hooks = "claude-code"     # auto-inject NeedsYou/Done status hooks
 
 [agents.codex]
 cmd = "codex {prompt}"
@@ -305,7 +305,7 @@ mod tests {
             let c = parse(tpl).unwrap();
             assert_eq!(c.default_agent.as_deref(), Some("claude"));
             assert_eq!(c.agents["claude"].cmd, "claude {prompt}");
-            assert!(c.agents["claude"].hooks.is_none()); // commented out
+            assert_eq!(c.agents["claude"].hooks.as_deref(), Some("claude-code"));
             assert_eq!(c.agents["shell"].cmd, "");
             assert!(c.agents.contains_key("codex") && c.agents.contains_key("gemini"));
             assert!(c.repos.is_empty());

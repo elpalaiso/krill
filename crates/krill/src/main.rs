@@ -53,6 +53,12 @@ fn run() -> Result<()> {
             let name = o.pos.first().context(msg::name_required("diff"))?;
             commands::diff(name, o.val("--repo"), o.flag("--stat"))
         }
+        "hook" => {
+            let o = args::parse(rest, &[("-i", "--id")], &[])?;
+            let state = o.pos.first().context(msg::hook_usage())?;
+            let id = o.val("--id").context(msg::hook_usage())?;
+            commands::hook(state, id)
+        }
         "serve" => {
             let o = args::parse(rest, &[("-b", "--bind"), ("-p", "--port")], &[])?;
             commands::serve(o.val("--bind"), o.val("--port"))

@@ -85,25 +85,103 @@ impl SessionMeta {
         if let Ok(p) = self.log_path() {
             let _ = std::fs::remove_file(p);
         }
+        if let Ok(p) = state_path(&self.id()) {
+            let _ = std::fs::remove_file(p);
+        }
         Ok(())
     }
 }
 
-/// Session health as far as M0 can tell. Precise NeedsYou/Done states
-/// arrive with hooks in M3 (design doc §6).
+// ---- hook state (M3) --------------------------------------------------------
+//
+// Agents with a hook preset report precise states by running
+// `krill hook <state> -i <session-id>`, which writes a small state file.
+// File-based on purpose (not HTTP): it works with zero resident
+// processes — design principle 3 — while `/api/hook` would require
+// `krill serve` to be running.
+
+/// Precise states an agent can report through hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Health {
+pub enum HookState {
+    /// Waiting for approval/input — surface to the human.
+    NeedsYou,
+    /// Turn or session finished.
+    Done,
+}
+
+impl HookState {
+    pub fn parse(s: &str) -> Option<HookState> {
+        match s {
+            "needs-you" => Some(HookState::NeedsYou),
+            "done" => Some(HookState::Done),
+            _ => None,
+        }
+    }
+}
+
+pub fn state_dir() -> Result<PathBuf> {
+    Ok(crate::data_dir()?.join("state"))
+}
+
+pub fn state_path(id: &str) -> Result<PathBuf> {
+    Ok(state_dir()?.join(format!("{id}.kv")))
+}
+
+pub fn write_hook_state(id: &str, state: HookState) -> Result<()> {
+    write_hook_state_in(&state_dir()?, id, state)
+}
+
+fn write_hook_state_in(dir: &Path, id: &str, state: HookState) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut m = BTreeMap::new();
+    m.insert(
+        "state".to_string(),
+        match state {
+            HookState::NeedsYou => "needs-you".to_string(),
+            HookState::Done => "done".to_string(),
+        },
+    );
+    m.insert("at".to_string(), crate::now_unix().to_string());
+    kv::write_file(&dir.join(format!("{id}.kv")), &m)?;
+    Ok(())
+}
+
+/// (state, seconds since it was reported), from the state file's mtime.
+fn read_hook_state(meta: &SessionMeta) -> Option<(HookState, u64)> {
+    let path = state_path(&meta.id()).ok()?;
+    let age = std::fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()?
+        .as_secs();
+    let map = kv::read_file(&path).ok()?;
+    let state = HookState::parse(map.get("state")?.as_str())?;
+    Some((state, age))
+}
+
+// ---- status -----------------------------------------------------------------
+
+/// Combined session status: precise hook states layered over the
+/// activity heuristic (design doc §6/§6.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// Hook: waiting for approval/input.
+    NeedsYou,
     /// tmux alive, output within the last 30s.
     Active,
     /// tmux alive, no recent output.
     Quiet,
+    /// Hook: turn/session finished.
+    Done,
     /// tmux session is gone.
     Dead,
 }
 
-pub fn health(meta: &SessionMeta, live_sessions: &[String]) -> (Health, Option<u64>) {
+pub fn status(meta: &SessionMeta, live_sessions: &[String]) -> (Status, Option<u64>) {
     let alive = live_sessions.iter().any(|s| s == &meta.tmux);
-    let age = if alive {
+    let log_age = if alive {
         meta.log_path()
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -113,17 +191,34 @@ pub fn health(meta: &SessionMeta, live_sessions: &[String]) -> (Health, Option<u
     } else {
         None
     };
-    classify(alive, age)
+    let hook = if alive { read_hook_state(meta) } else { None };
+    classify(alive, log_age, hook)
 }
 
-/// Pure health rule: dead beats everything; ≤30s-old output = active.
-fn classify(alive: bool, age_secs: Option<u64>) -> (Health, Option<u64>) {
+/// Pure status rule: dead beats everything; a hook state holds until the
+/// agent produces newer output (then activity takes over); without a
+/// current hook state, ≤30s-old output = active.
+fn classify(
+    alive: bool,
+    log_age: Option<u64>,
+    hook: Option<(HookState, u64)>,
+) -> (Status, Option<u64>) {
     if !alive {
-        return (Health::Dead, None);
+        return (Status::Dead, None);
     }
-    match age_secs {
-        Some(a) if a <= 30 => (Health::Active, Some(a)),
-        other => (Health::Quiet, other),
+    if let Some((hs, hook_age)) = hook {
+        let hook_is_current = log_age.map_or(true, |la| hook_age <= la);
+        if hook_is_current {
+            let s = match hs {
+                HookState::NeedsYou => Status::NeedsYou,
+                HookState::Done => Status::Done,
+            };
+            return (s, log_age);
+        }
+    }
+    match log_age {
+        Some(a) if a <= 30 => (Status::Active, Some(a)),
+        other => (Status::Quiet, other),
     }
 }
 
@@ -155,6 +250,14 @@ fn load_all_from(dir: &Path) -> Result<Vec<SessionMeta>> {
 /// Find a session by name (unique across repos, or disambiguate with repo).
 pub fn find(name: &str, repo: Option<&str>) -> Result<SessionMeta> {
     find_among(load_all()?, name, repo)
+}
+
+/// Find by full id ("repo--name") — hook callers only know the id.
+pub fn find_by_id(id: &str) -> Result<SessionMeta> {
+    match load_all()?.into_iter().find(|m| m.id() == id) {
+        Some(m) => Ok(m),
+        None => bail!(msg::session_not_found(id)),
+    }
 }
 
 fn find_among(all: Vec<SessionMeta>, name: &str, repo: Option<&str>) -> Result<SessionMeta> {
@@ -268,11 +371,42 @@ mod tests {
     }
 
     #[test]
-    fn classify_health_states() {
-        assert_eq!(classify(false, None), (Health::Dead, None));
-        assert_eq!(classify(true, Some(0)), (Health::Active, Some(0)));
-        assert_eq!(classify(true, Some(30)), (Health::Active, Some(30)));
-        assert_eq!(classify(true, Some(31)), (Health::Quiet, Some(31)));
-        assert_eq!(classify(true, None), (Health::Quiet, None));
+    fn classify_heuristic_states_without_hooks() {
+        assert_eq!(classify(false, None, None), (Status::Dead, None));
+        assert_eq!(classify(true, Some(0), None), (Status::Active, Some(0)));
+        assert_eq!(classify(true, Some(30), None), (Status::Active, Some(30)));
+        assert_eq!(classify(true, Some(31), None), (Status::Quiet, Some(31)));
+        assert_eq!(classify(true, None, None), (Status::Quiet, None));
+    }
+
+    #[test]
+    fn classify_hook_states_hold_until_newer_output() {
+        // Hook fired after the last output (hook_age <= log_age) → precise state.
+        let needs = Some((HookState::NeedsYou, 5));
+        assert_eq!(classify(true, Some(10), needs), (Status::NeedsYou, Some(10)));
+        let done = Some((HookState::Done, 60));
+        assert_eq!(classify(true, Some(60), done), (Status::Done, Some(60)));
+        // No log at all → hook state stands.
+        assert_eq!(classify(true, None, needs), (Status::NeedsYou, None));
+        // Agent produced output after the hook → back to the activity rule.
+        assert_eq!(classify(true, Some(3), Some((HookState::NeedsYou, 50))), (Status::Active, Some(3)));
+        assert_eq!(classify(true, Some(40), Some((HookState::Done, 90))), (Status::Quiet, Some(40)));
+        // Dead beats hooks.
+        assert_eq!(classify(false, None, needs), (Status::Dead, None));
+    }
+
+    #[test]
+    fn hook_state_parse_and_file_roundtrip() {
+        assert_eq!(HookState::parse("needs-you"), Some(HookState::NeedsYou));
+        assert_eq!(HookState::parse("done"), Some(HookState::Done));
+        assert_eq!(HookState::parse("working"), None);
+
+        let dir = std::env::temp_dir().join(format!("krill-test-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hook_state_in(&dir, "web--fix", HookState::NeedsYou).unwrap();
+        let map = kv::read_file(&dir.join("web--fix.kv")).unwrap();
+        assert_eq!(map.get("state").map(String::as_str), Some("needs-you"));
+        assert!(map.contains_key("at"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

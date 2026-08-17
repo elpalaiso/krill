@@ -30,6 +30,7 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill rm <이름> [-f|--force]        세션 · worktree · 브랜치 정리
   krill serve [-b <주소>|tailscale] [-p <포트>]  웹 UI (기본 127.0.0.1:7777)
+  krill hook <상태> -i <세션ID>       (내부용) 에이전트 훅이 상태를 보고
   krill --help | --version
 
 예시:
@@ -57,6 +58,7 @@ usage:
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill rm <name> [-f|--force]        remove session · worktree · branch
   krill serve [-b <addr>|tailscale] [-p <port>]  web UI (default 127.0.0.1:7777)
+  krill hook <state> -i <session-id>  (internal) agent hooks report state
   krill --help | --version
 
 examples:
@@ -274,6 +276,14 @@ messages! {
     tailscale_failed() => {
         en: "failed to resolve the tailscale address (is tailscale installed and up?)",
         ko: "tailscale 주소를 확인할 수 없습니다 (tailscale이 설치·실행 중인가요?)",
+    }
+    hook_usage() => {
+        en: "usage: krill hook <needs-you|done> -i <session-id>",
+        ko: "사용법: krill hook <needs-you|done> -i <세션ID>",
+    }
+    hook_settings_exists(path: &str) => {
+        en: "keeping the existing hook settings: {path}",
+        ko: "기존 훅 설정을 유지합니다: {path}",
     }
 }
 

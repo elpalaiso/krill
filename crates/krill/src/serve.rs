@@ -21,7 +21,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use krill_core::error::{Context, Result};
-use krill_core::session::{self, Health};
+use krill_core::session::{self, Status};
 use krill_core::{bail, git, tmux};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -50,11 +50,13 @@ struct SessionInfo {
     diff: String,
 }
 
-fn state_str(h: Health) -> &'static str {
+fn state_str(h: Status) -> &'static str {
     match h {
-        Health::Active => "active",
-        Health::Quiet => "quiet",
-        Health::Dead => "dead",
+        Status::NeedsYou => "needs-you",
+        Status::Active => "active",
+        Status::Quiet => "quiet",
+        Status::Done => "done",
+        Status::Dead => "dead",
     }
 }
 
@@ -283,8 +285,8 @@ fn snapshot() -> Result<Vec<SessionInfo>> {
     Ok(metas
         .into_iter()
         .map(|meta| {
-            let (h, age) = session::health(&meta, &live);
-            let diff = if h == Health::Dead {
+            let (h, age) = session::status(&meta, &live);
+            let diff = if h == Status::Dead {
                 "-".into()
             } else {
                 git::shortstat(&meta.worktree, &meta.base)
@@ -346,9 +348,11 @@ mod tests {
 
     #[test]
     fn states_map_to_the_ls_vocabulary() {
-        assert_eq!(state_str(Health::Active), "active");
-        assert_eq!(state_str(Health::Quiet), "quiet");
-        assert_eq!(state_str(Health::Dead), "dead");
+        assert_eq!(state_str(Status::NeedsYou), "needs-you");
+        assert_eq!(state_str(Status::Active), "active");
+        assert_eq!(state_str(Status::Quiet), "quiet");
+        assert_eq!(state_str(Status::Done), "done");
+        assert_eq!(state_str(Status::Dead), "dead");
     }
 
     #[test]
