@@ -71,6 +71,15 @@ flow — 릴레이를 자동화한 체인. 스테이지가 Done이 되면(훅) �
 krill new fix-login --flow shipit -m "로그인 버그 고쳐줘"
 ```
 
+듀엣 — 한 worktree에서 worker와 reviewer가 턴제로 핑퐁. reviewer는
+REVIEW.md(첫 줄 LGTM/ISSUES)만 쓰고, LGTM은 객관 게이트(테스트 명령)를
+통과해야 유효합니다. 심판은 모델이 아니라 krill의 결정적 코드입니다:
+
+```sh
+krill duet fix-login -m "로그인 버그 고쳐줘" \
+    --reviewer codex --gate "cargo test" --max-rounds 2
+```
+
 ## 로드맵
 
 | 단계 | 내용 | 상태 |
@@ -81,7 +90,7 @@ krill new fix-login --flow shipit -m "로그인 버그 고쳐줘"
 | M2 | `krill serve`: 웹 UI + Tailscale 원격 접속 | ✅ (`--expose`만 후순위) |
 | M3 | Claude Code 훅 연동(NeedsYou 정확 감지), ntfy 푸시, merge/pr | ✅ |
 | M4 | 릴리스 CI, Homebrew tap | ✅ (첫 태그 릴리스 대기) |
-| M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰) | 🟡 (flow 체인 ✅, 듀엣 ⬜) |
+| M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰) | 🟡 (flow ✅, 듀엣 ✅, planner ⬜) |
 
 ## 라이선스
 

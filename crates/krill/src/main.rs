@@ -60,6 +60,36 @@ fn run() -> Result<()> {
             let name = o.pos.first().context(msg::name_required("diff"))?;
             commands::diff(name, o.val("--repo"), o.flag("--stat"))
         }
+        "duet" => {
+            let o = args::parse(
+                rest,
+                &[
+                    ("-a", "--agent"),
+                    ("", "--reviewer"),
+                    ("-r", "--repo"),
+                    ("-m", "--message"),
+                    ("", "--gate"),
+                    ("", "--max-rounds"),
+                ],
+                &[],
+            )?;
+            let name = o.pos.first().context(msg::name_required("duet"))?;
+            commands::duet(
+                name,
+                o.val("--agent"),
+                o.val("--reviewer"),
+                o.val("--repo"),
+                o.val("--message"),
+                o.val("--gate"),
+                o.val("--max-rounds"),
+            )
+        }
+        "duet-gate" => {
+            // Internal: the detached gate child spawned by the referee.
+            let o = args::parse(rest, &[("-i", "--id")], &[])?;
+            let id = o.val("--id").context(msg::hook_usage())?;
+            commands::duet_gate(id)
+        }
         "hook" => {
             let o = args::parse(rest, &[("-i", "--id")], &[])?;
             let state = o.pos.first().context(msg::hook_usage())?;

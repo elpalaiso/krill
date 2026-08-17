@@ -126,6 +126,10 @@ crate::messages! {
         en: "failed to parse flow_stage",
         ko: "flow_stage 파싱 실패",
     }
+    duet_state_parse_failed() => {
+        en: "failed to parse the duet state file",
+        ko: "듀엣 상태 파일 파싱 실패",
+    }
 }
 
 #[cfg(test)]

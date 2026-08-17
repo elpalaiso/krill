@@ -1,4 +1,5 @@
 use crate::config::FlowStage;
+use crate::duet::{DuetRef, DuetRole};
 use crate::error::{Context, Result};
 use crate::{bail, kv, msg};
 use std::collections::BTreeMap;
@@ -31,6 +32,8 @@ pub struct SessionMeta {
     pub created_unix: u64,
     /// Set when this session is a stage of a flow chain.
     pub flow: Option<FlowRef>,
+    /// Set when this session is half of a duet (M5b).
+    pub duet: Option<DuetRef>,
 }
 
 impl SessionMeta {
@@ -64,6 +67,10 @@ impl SessionMeta {
             m.insert("flow_base".into(), f.base.clone());
             m.insert("flow_goal".into(), f.goal.clone());
         }
+        if let Some(d) = &self.duet {
+            m.insert("duet_role".into(), d.role.as_str().into());
+            m.insert("duet_peer".into(), d.peer.clone());
+        }
         m
     }
 
@@ -83,6 +90,15 @@ impl SessionMeta {
             }),
             None => None,
         };
+        // Optional duet membership (M5b).
+        let duet = match m.get("duet_role") {
+            Some(role) => Some(DuetRef {
+                role: DuetRole::parse(role)
+                    .with_context(|| msg::meta_field_missing("duet_role"))?,
+                peer: req("duet_peer")?,
+            }),
+            None => None,
+        };
         Ok(SessionMeta {
             name: req("name")?,
             repo_name: req("repo_name")?,
@@ -97,6 +113,7 @@ impl SessionMeta {
                 .parse()
                 .context(msg::meta_created_parse_failed())?,
             flow,
+            duet,
         })
     }
 
@@ -370,6 +387,7 @@ mod tests {
             tmux: format!("krill_{repo}_{name}"),
             created_unix: created,
             flow: None,
+            duet: None,
         }
     }
 
@@ -408,6 +426,14 @@ mod tests {
 
         // Pre-M5 meta (no flow keys) still loads.
         assert_eq!(SessionMeta::from_map(&meta("a", "r", 1).to_map()).unwrap().flow, None);
+
+        // Duet membership roundtrips too.
+        let mut d = meta("fix", "web", 1);
+        d.duet = Some(DuetRef { role: DuetRole::Worker, peer: "fix-rev".into() });
+        assert_eq!(SessionMeta::from_map(&d.to_map()).unwrap().duet, d.duet);
+        let mut bad_role = d.to_map();
+        bad_role.insert("duet_role".into(), "referee".into());
+        assert!(SessionMeta::from_map(&bad_role).is_err());
 
         // A flow entry with a broken stage number is an error, not a guess.
         let mut bad = m.to_map();

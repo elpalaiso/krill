@@ -7,6 +7,7 @@
 //! arrive with M1+.
 
 pub mod config;
+pub mod duet;
 pub mod error;
 pub mod git;
 pub mod i18n;

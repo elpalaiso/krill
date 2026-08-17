@@ -28,6 +28,8 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
           --from <세션>               다른 세션의 브랜치에서 시작 (릴레이 핸드오프)
           --flow <flow>               [flows.*] 체인 시작 — 스테이지가 Done이 되면
                                       다음 스테이지를 자동 릴레이 (-m = 목표, {goal})
+  krill duet <이름> -m \"작업\"         worker+reviewer 턴제 핑퐁 (한 worktree)
+      -a <에이전트> · --reviewer <에이전트> · --gate <명령> · --max-rounds <N>
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill merge <이름> [--squash]       base에 머지 후 세션 정리 (base 체크아웃 상태에서)
@@ -60,6 +62,8 @@ usage:
           --from <session>            branch off another session's work (relay handoff)
           --flow <flow>               start a [flows.*] chain — each Done stage
                                       auto-relays the next (-m = goal, {goal})
+  krill duet <name> -m \"task\"         worker+reviewer turn-based ping-pong (one worktree)
+      -a <agent> · --reviewer <agent> · --gate <cmd> · --max-rounds <N>
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill merge <name> [--squash]       merge into base + clean up (run with base checked out)
@@ -328,6 +332,62 @@ messages! {
     ntfy_flow_spawn_failed(flow: &str, name: &str, err: &str) => {
         en: "flow {flow}: failed to start {name}: {err}",
         ko: "flow {flow}: {name} 시작 실패: {err}",
+    }
+    duet_goal_required() => {
+        en: "duet needs a task: krill duet <name> -m \"task\"",
+        ko: "듀엣에는 작업이 필요합니다: krill duet <이름> -m \"작업\"",
+    }
+    duet_bad_rounds(v: &str) => {
+        en: "--max-rounds must be a number ≥ 1: {v}",
+        ko: "--max-rounds는 1 이상의 숫자여야 합니다: {v}",
+    }
+    duet_no_hooks_warn(agent: &str) => {
+        en: "warning: agent '{agent}' has no hook preset — the duet referee only moves on hook events; add `hooks = \"claude-code\"`.",
+        ko: "경고: '{agent}' 에이전트에 훅 프리셋이 없습니다 — 듀엣 심판은 훅 이벤트로만 움직입니다; `hooks = \"claude-code\"`를 추가하세요.",
+    }
+    duet_started() => {
+        en: "duet started",
+        ko: "듀엣 시작",
+    }
+    duet_no_gate() => {
+        en: "(none — LGTM alone completes)",
+        ko: "(없음 — LGTM만으로 완료)",
+    }
+    duet_review_instruction(goal: &str) => {
+        en: "You are the reviewer in a krill duet. Goal: {goal}. Review the worktree's current changes vs its base (committed and uncommitted). Do NOT edit code — write only REVIEW.md: first line exactly LGTM or ISSUES, then your findings.",
+        ko: "당신은 krill 듀엣의 리뷰어입니다. 목표: {goal}. worktree의 현재 변경(base 대비, 커밋 전 포함)을 리뷰하세요. 코드는 수정하지 말고 REVIEW.md만 작성하세요: 첫 줄은 정확히 LGTM 또는 ISSUES, 이어서 지적 내용.",
+    }
+    duet_fix_instruction(round: u32, max: u32) => {
+        en: "The reviewer left findings in REVIEW.md — address them in the code (round {round}/{max}).",
+        ko: "리뷰어가 REVIEW.md에 지적을 남겼습니다 — 코드에 반영하세요 (라운드 {round}/{max}).",
+    }
+    duet_review_missing() => {
+        en: "REVIEW.md was not found. Write REVIEW.md now: first line exactly LGTM or ISSUES, then your findings.",
+        ko: "REVIEW.md가 없습니다. 지금 REVIEW.md를 작성하세요: 첫 줄은 정확히 LGTM 또는 ISSUES, 이어서 지적 내용.",
+    }
+    duet_gate_fix_instruction(round: u32, max: u32) => {
+        en: "The gate command failed — see GATE.md and fix the code (round {round}/{max}).",
+        ko: "게이트 명령이 실패했습니다 — GATE.md를 보고 코드를 고치세요 (라운드 {round}/{max}).",
+    }
+    duet_gate_run_failed(gate: &str) => {
+        en: "failed to run the gate command: {gate}",
+        ko: "게이트 명령을 실행할 수 없습니다: {gate}",
+    }
+    gate_md_header(gate: &str) => {
+        en: "# Gate failed\n\nCommand: `{gate}` (output tail below)",
+        ko: "# 게이트 실패\n\n명령: `{gate}` (아래는 출력 끝부분)",
+    }
+    ntfy_duet_done(name: &str) => {
+        en: "duet {name}: review passed — ready to merge (krill merge {name})",
+        ko: "듀엣 {name}: 리뷰 통과 — 머지 준비 완료 (krill merge {name})",
+    }
+    ntfy_duet_stalled(name: &str, rounds: u32) => {
+        en: "duet {name} needs you: round cap ({rounds}) reached",
+        ko: "듀엣 {name} 확인 필요: 라운드 캡({rounds}) 도달",
+    }
+    merge_on_reviewer(worker: &str) => {
+        en: "this is the reviewer half of a duet — merge via its worker: krill merge {worker}",
+        ko: "듀엣의 리뷰어 세션입니다 — worker로 머지하세요: krill merge {worker}",
     }
     merge_dirty(name: &str) => {
         en: "session '{name}' has uncommitted changes — commit them in the session first (krill attach {name}).",
