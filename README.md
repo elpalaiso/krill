@@ -80,6 +80,16 @@ krill duet fix-login -m "로그인 버그 고쳐줘" \
     --reviewer codex --gate "cargo test" --max-rounds 2
 ```
 
+plan — 대장(planner)이 큰 목표를 plan.md 체크리스트로 분해하면, 사람은
+계획만 승인합니다. 이후 작업마다 듀엣이 돌고 통과할 때마다 커밋됩니다
+(작업 1개 = 커밋 1개). plan.md가 곧 작업 큐라 실행 중에 편집해도 됩니다:
+
+```sh
+krill plan big-refactor -m "설정 모듈을 모두 TOML로 이관" --gate "cargo test"
+# … planner가 plan.md 작성 → ◆ needs-you → plan.md 검토·수정 후:
+krill approve big-refactor
+```
+
 ## 로드맵
 
 | 단계 | 내용 | 상태 |
@@ -90,7 +100,7 @@ krill duet fix-login -m "로그인 버그 고쳐줘" \
 | M2 | `krill serve`: 웹 UI + Tailscale 원격 접속 | ✅ (`--expose`만 후순위) |
 | M3 | Claude Code 훅 연동(NeedsYou 정확 감지), ntfy 푸시, merge/pr | ✅ |
 | M4 | 릴리스 CI, Homebrew tap | ✅ (첫 태그 릴리스 대기) |
-| M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰) | 🟡 (flow ✅, 듀엣 ✅, planner ⬜) |
+| M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰), planner | ✅ |
 
 ## 라이선스
 

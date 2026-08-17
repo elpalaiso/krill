@@ -84,6 +84,35 @@ fn run() -> Result<()> {
                 o.val("--max-rounds"),
             )
         }
+        "plan" => {
+            let o = args::parse(
+                rest,
+                &[
+                    ("-a", "--agent"),
+                    ("", "--reviewer"),
+                    ("-r", "--repo"),
+                    ("-m", "--message"),
+                    ("", "--gate"),
+                    ("", "--max-rounds"),
+                ],
+                &[],
+            )?;
+            let name = o.pos.first().context(msg::name_required("plan"))?;
+            commands::plan(
+                name,
+                o.val("--agent"),
+                o.val("--reviewer"),
+                o.val("--repo"),
+                o.val("--message"),
+                o.val("--gate"),
+                o.val("--max-rounds"),
+            )
+        }
+        "approve" => {
+            let o = args::parse(rest, &[("-r", "--repo")], &[])?;
+            let name = o.pos.first().context(msg::name_required("approve"))?;
+            commands::approve(name, o.val("--repo"))
+        }
         "duet-gate" => {
             // Internal: the detached gate child spawned by the referee.
             let o = args::parse(rest, &[("-i", "--id")], &[])?;

@@ -456,10 +456,25 @@ awaiting과 다른 쪽의 훅은 무시(멱등). **라운드**: round = worker�
 수 있고, 에이전트도 잘 쓴다. §12 본문의 plan.yaml 표기는 이 형식으로
 대체된 것으로 읽는다.
 
+**결정 6 — plan.md가 곧 작업 큐다 (M5c).** `krill plan <이름> -m "목표"`가
+planner 세션을 띄워 plan.md 체크리스트를 쓰게 하고, Done 훅이 plan.md를
+확인하면 needs-you + ntfy로 사람을 부른다(계획 승인은 언제나 사람 —
+plan.md를 직접 고쳐도 된다. planner가 plan.md 없이 턴을 끝내면 1회 재지시
+후 사람에게 넘긴다). `krill approve <이름>`이 reviewer 세션을 붙여 승인
+시점부터 **planner 세션이 그대로 duet worker가 된다** — 세션을 갈아끼우지
+않으므로 프로젝트 맥락이 작업 내내 누적된다(§12 본문의 부수 효과). 작업
+진행 상태는 별도 DB가 아니라 plan.md의 체크박스 그 자체다: 다음 작업 =
+첫 `- [ ]` 줄, 실행 중에 사람이 작업을 추가·삭제해도 그대로 반영된다.
+작업마다 duet 상태를 새로 시작(라운드 0, goal=작업 텍스트)하고, 작업이
+duet를 통과하면 심판이 체크박스를 갱신한 뒤 그 갱신까지 포함해 커밋한다
+(`git add -A`에서 `.claude`는 제외, REVIEW/GATE.md는 커밋 전 정리) — 작업
+하나 = 커밋 하나. 모든 작업이 끝나면 phase=done + ntfy. plan 메타 상태
+(phase·reviewer·gate·캡)는 `state/<id>.plan.kv`.
+
 **슬라이스.** M5a: `[flows.*]` 파싱 + `krill new --flow` + Done 훅 자동
 체인 + ls/TUI flow 표기. M5b: `krill duet`(단일 작업 핑퐁 — 공유 worktree,
-REVIEW.md 프로토콜, gate, 라운드 캡). M5c: planner + plan.md 순회(작업마다
-듀엣, 완료 시 커밋 + 체크박스 갱신, 시작 전 사람의 계획 승인).
+REVIEW.md 프로토콜, gate, 라운드 캡). M5c: `krill plan`/`krill approve` +
+plan.md 순회(작업마다 듀엣, 완료 시 커밋 + 체크박스 갱신).
 
 ## 13. 리스크와 열린 질문
 

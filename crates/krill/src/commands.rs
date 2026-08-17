@@ -4,6 +4,7 @@ use krill_core::config::Config;
 use krill_core::error::{Context, Result};
 use krill_core::git;
 use krill_core::duet::{self, Action, Awaiting, DuetRef, DuetRole, DuetState, Event};
+use krill_core::plan::{self, PlanPhase, PlanState};
 use krill_core::session::{self, FlowNext, FlowRef, SessionMeta, Status};
 use krill_core::tmux;
 use std::io::Write as _;
@@ -111,6 +112,173 @@ fn flow_names(config: &Config) -> String {
     }
 }
 
+/// Gate priority: CLI flag > repo gate > [duet] gate > none.
+fn resolve_gate(cli: Option<&str>, repo_name: &str, config: &Config) -> String {
+    cli.map(str::to_string)
+        .or_else(|| config.repos.get(repo_name).and_then(|r| r.gate.clone()))
+        .or_else(|| config.duet.gate.clone())
+        .unwrap_or_default()
+}
+
+/// `krill plan <name> -m "goal"` (M5c, §12.1 decision 6) — spawn a
+/// planner session that writes a plan.md checklist. Its Done hook flips
+/// the plan to Ready (needs-you); `krill approve` starts the task walk.
+pub fn plan(
+    name: &str,
+    agent: Option<&str>,
+    reviewer: Option<&str>,
+    repo: Option<&str>,
+    message: Option<&str>,
+    gate: Option<&str>,
+    max_rounds: Option<&str>,
+) -> Result<()> {
+    let Some(goal) = message else {
+        bail!(m::plan_goal_required());
+    };
+    let config = Config::load()?;
+    let max_rounds: u32 = match max_rounds {
+        Some(v) => match v.parse().ok().filter(|n: &u32| *n >= 1) {
+            Some(n) => n,
+            None => bail!(m::duet_bad_rounds(v)),
+        },
+        None => config.duet.max_rounds.unwrap_or(2),
+    };
+    let reviewer = reviewer
+        .map(str::to_string)
+        .or_else(|| config.duet.reviewer.clone());
+    for side in [agent, reviewer.as_deref()] {
+        if let Ok((agent_name, cfg)) = config.resolve_agent(side) {
+            if cfg.hooks.is_none() {
+                eprintln!("{}", m::duet_no_hooks_warn(&agent_name));
+            }
+        }
+    }
+
+    let planner = create_session_full(
+        name,
+        agent,
+        repo,
+        Some(&m::plan_prompt(goal)),
+        None,
+        None,
+        None,
+    )?;
+    let gate = resolve_gate(gate, &planner.repo_name, &config);
+    if let Err(e) =
+        krill_core::plan::PlanState::new(goal, reviewer, &gate, max_rounds).save(&planner.id())
+    {
+        let _ = remove_session(&planner, true);
+        return Err(e);
+    }
+
+    println!("{BOLD}{}{RESET} {}", planner.name, m::plan_started());
+    println!("  repo     {} ({})", planner.repo_name, planner.repo_path.display());
+    println!("  branch   {} (base: {})", planner.branch, planner.base);
+    println!("  planner  {}", planner.agent);
+    println!(
+        "  gate     {}  ·  max rounds {max_rounds}",
+        if gate.is_empty() { m::duet_no_gate() } else { gate.clone() }
+    );
+    println!();
+    println!("{}", m::plan_hint(&format!("{BOLD}krill approve {}{RESET}", planner.name)));
+    Ok(())
+}
+
+/// `krill approve <name>` — the human sign-off on plan.md. Attaches the
+/// reviewer, turns the planner into the duet worker (context accrues in
+/// one session), and sends the first task.
+pub fn approve(name: &str, repo: Option<&str>) -> Result<()> {
+    let mut worker = session::find(name, repo)?;
+    let id = worker.id();
+    let mut ps = match krill_core::plan::PlanState::load(&id) {
+        Ok(ps) => ps,
+        Err(_) => bail!(m::plan_not_a_plan(name)),
+    };
+    if ps.phase != krill_core::plan::PlanPhase::Ready {
+        bail!(m::plan_wrong_phase(name, ps.phase.as_str()));
+    }
+    let plan_md = std::fs::read_to_string(worker.worktree.join("plan.md"))
+        .context(m::plan_md_missing(name))?;
+    let Some(first) = krill_core::plan::first_open_task(&plan_md) else {
+        bail!(m::plan_no_tasks(name));
+    };
+    let (done, total) = krill_core::plan::progress(&plan_md);
+
+    let config = Config::load()?;
+    let rev_meta = spawn_reviewer_for(&worker, ps.reviewer.as_deref(), &config)?;
+    worker.duet = Some(DuetRef { role: DuetRole::Worker, peer: rev_meta.name.clone() });
+    worker.save()?;
+
+    // Fresh duet round per task; the task text is the review goal.
+    DuetState::new(ps.max_rounds, &ps.gate, &first).save(&id)?;
+    ps.phase = krill_core::plan::PlanPhase::Running;
+    ps.save(&id)?;
+    tmux::send_line(&worker.tmux, &m::plan_task_instruction(&first))?;
+
+    println!("{}", m::plan_approved(total - done, &rev_meta.agent));
+    println!("  → {first}");
+    Ok(())
+}
+/// worker's worktree — no branch or worktree of its own (§12.1). The
+/// reviewer launches bare; instructions arrive per round via send-keys.
+fn spawn_reviewer_for(
+    worker: &SessionMeta,
+    reviewer: Option<&str>,
+    config: &Config,
+) -> Result<SessionMeta> {
+    let rev_name = format!("{}-rev", worker.name);
+    let (rev_agent, rev_cfg) = config.resolve_agent(reviewer)?;
+    if session::load_all()?
+        .iter()
+        .any(|s| s.name == rev_name && s.repo_name == worker.repo_name)
+    {
+        bail!(m::session_exists(&rev_name, &worker.repo_name));
+    }
+    let rev_id = format!("{}--{}", worker.repo_name, rev_name);
+    let cmd = rev_cfg.cmd.replace("{prompt}", "").trim().to_string();
+    let cmd = if rev_cfg.hooks.is_some() && !cmd.is_empty() {
+        format!("KRILL_SESSION_ID={} {cmd}", krill_core::shell_quote(&rev_id))
+    } else {
+        cmd
+    };
+    let tmux_name = tmux_safe(&format!("krill_{}_{}", worker.repo_name, rev_name));
+    let meta = SessionMeta {
+        name: rev_name,
+        repo_name: worker.repo_name.clone(),
+        repo_path: worker.repo_path.clone(),
+        base: worker.base.clone(),
+        branch: worker.branch.clone(),
+        worktree: worker.worktree.clone(), // shared — see §12.1
+        agent: rev_agent,
+        cmd: cmd.clone(),
+        tmux: tmux_name.clone(),
+        created_unix: krill_core::now_unix(),
+        flow: None,
+        duet: Some(DuetRef { role: DuetRole::Reviewer, peer: worker.name.clone() }),
+    };
+    if tmux::has(&tmux_name) {
+        bail!(m::tmux_name_taken(&tmux_name));
+    }
+    tmux::new_session(&tmux_name, &meta.worktree)?;
+    let spawn = || -> Result<()> {
+        let log = meta.log_path()?;
+        if let Some(dir) = log.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        tmux::pipe_to_log(&tmux_name, &log)?;
+        if !cmd.is_empty() {
+            tmux::send_line(&tmux_name, &cmd)?;
+        }
+        Ok(())
+    };
+    if let Err(e) = spawn() {
+        let _ = tmux::kill(&tmux_name);
+        return Err(e);
+    }
+    meta.save()?;
+    Ok(meta)
+}
+
 /// `krill duet <name> -m "task"` — turn-based worker/reviewer ping-pong
 /// over one shared worktree (design §12.1 decision 4). The worker is a
 /// normal session; the reviewer is a second tmux session in the same
@@ -150,64 +318,8 @@ pub fn duet(
 
     // Worker first (normal session — worktree, branch, goal prompt).
     let mut worker = create_session_full(name, agent, repo, Some(goal), None, None, None)?;
-    let rev_name = format!("{name}-rev");
 
-    let spawn_reviewer = || -> Result<SessionMeta> {
-        let (rev_agent, rev_cfg) = config.resolve_agent(reviewer.as_deref())?;
-        if session::load_all()?
-            .iter()
-            .any(|s| s.name == rev_name && s.repo_name == worker.repo_name)
-        {
-            bail!(m::session_exists(&rev_name, &worker.repo_name));
-        }
-        let rev_id = format!("{}--{}", worker.repo_name, rev_name);
-        // Launched bare (no prompt): instructions arrive per round via
-        // send-keys from the referee.
-        let cmd = rev_cfg.cmd.replace("{prompt}", "").trim().to_string();
-        let cmd = if rev_cfg.hooks.is_some() && !cmd.is_empty() {
-            format!("KRILL_SESSION_ID={} {cmd}", krill_core::shell_quote(&rev_id))
-        } else {
-            cmd
-        };
-        let tmux_name = tmux_safe(&format!("krill_{}_{}", worker.repo_name, rev_name));
-        let meta = SessionMeta {
-            name: rev_name.clone(),
-            repo_name: worker.repo_name.clone(),
-            repo_path: worker.repo_path.clone(),
-            base: worker.base.clone(),
-            branch: worker.branch.clone(),
-            worktree: worker.worktree.clone(), // shared — see §12.1
-            agent: rev_agent,
-            cmd: cmd.clone(),
-            tmux: tmux_name.clone(),
-            created_unix: krill_core::now_unix(),
-            flow: None,
-            duet: Some(DuetRef { role: DuetRole::Reviewer, peer: worker.name.clone() }),
-        };
-        if tmux::has(&tmux_name) {
-            bail!(m::tmux_name_taken(&tmux_name));
-        }
-        tmux::new_session(&tmux_name, &meta.worktree)?;
-        let spawn = || -> Result<()> {
-            let log = meta.log_path()?;
-            if let Some(dir) = log.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            tmux::pipe_to_log(&tmux_name, &log)?;
-            if !cmd.is_empty() {
-                tmux::send_line(&tmux_name, &cmd)?;
-            }
-            Ok(())
-        };
-        if let Err(e) = spawn() {
-            let _ = tmux::kill(&tmux_name);
-            return Err(e);
-        }
-        meta.save()?;
-        Ok(meta)
-    };
-
-    let rev_meta = match spawn_reviewer() {
+    let rev_meta = match spawn_reviewer_for(&worker, reviewer.as_deref(), &config) {
         Ok(m) => m,
         Err(e) => {
             // No half-made duets: the worker goes too.
@@ -216,15 +328,10 @@ pub fn duet(
         }
     };
 
-    worker.duet = Some(DuetRef { role: DuetRole::Worker, peer: rev_name.clone() });
+    worker.duet = Some(DuetRef { role: DuetRole::Worker, peer: rev_meta.name.clone() });
     worker.save()?;
 
-    // Gate priority: CLI flag > repo gate > [duet] gate > none.
-    let gate = gate
-        .map(str::to_string)
-        .or_else(|| config.repos.get(&worker.repo_name).and_then(|r| r.gate.clone()))
-        .or_else(|| config.duet.gate.clone())
-        .unwrap_or_default();
+    let gate = resolve_gate(gate, &worker.repo_name, &config);
     DuetState::new(max_rounds, &gate, goal).save(&worker.id())?;
 
     println!("{BOLD}{}{RESET} {}", worker.name, m::duet_started());
@@ -433,6 +540,13 @@ pub fn ls() -> Result<()> {
                 .flow
                 .as_ref()
                 .map(|f| format!("{}:{}", f.flow, f.stage))
+                .or_else(|| {
+                    // A plan leader shows its phase; its reviewer (and
+                    // plain duets) show the duet role.
+                    PlanState::load(&m.id())
+                        .ok()
+                        .map(|p| format!("plan:{}", p.phase.as_str()))
+                })
                 .or_else(|| m.duet.as_ref().map(|d| format!("duet:{}", d.role.as_str())))
                 .unwrap_or_else(|| "-".into()),
             state: if attached { format!("{state}+⌨") } else { state },
@@ -716,13 +830,15 @@ pub fn hook(state: &str, id: &str) -> Result<()> {
 
     let config = Config::load().ok();
 
-    // Flow chain (M5a) and duet referee (M5b): Done may advance a chain
-    // or hand the duet turn over. A session is in at most one of the
-    // two, and the outcome replaces the generic ntfy body.
+    // Flow chain (M5a), plan phases (M5c), duet referee (M5b): Done may
+    // advance a chain, flip a plan to Ready, or hand the duet turn over.
+    // A running plan *is* a duet, so the plan layer only owns the
+    // planning phase and falls through otherwise. The outcome replaces
+    // the generic ntfy body.
     let note = match (&config, hs) {
-        (Some(cfg), krill_core::session::HookState::Done) => {
-            advance_flow(cfg, id).or_else(|| advance_duet(id))
-        }
+        (Some(cfg), krill_core::session::HookState::Done) => advance_flow(cfg, id)
+            .or_else(|| advance_plan(id))
+            .or_else(|| advance_duet(id)),
         _ => None,
     };
 
@@ -744,6 +860,86 @@ fn ntfy_push(topic: &str, body: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Plan phase transitions (M5c). Owns only the planning phase: when the
+/// planner's turn ends, plan.md with open tasks → Ready + needs-you;
+/// missing plan.md → one re-instruction, then hand it to the human.
+/// Ready/Running/Done fall through (`None`) — Running is duet territory.
+fn advance_plan(id: &str) -> Option<String> {
+    let mut ps = PlanState::load(id).ok()?;
+    if ps.phase != PlanPhase::Planning {
+        return None;
+    }
+    let meta = session::find_by_id(id).ok()?;
+    let plan_md = std::fs::read_to_string(meta.worktree.join("plan.md")).ok();
+    let has_tasks = plan_md
+        .as_deref()
+        .and_then(plan::first_open_task)
+        .is_some();
+    if has_tasks {
+        ps.phase = PlanPhase::Ready;
+        ps.save(id).ok()?;
+        let _ = session::write_hook_state(id, krill_core::session::HookState::NeedsYou);
+        let (_, total) = plan::progress(plan_md.as_deref().unwrap_or(""));
+        Some(m::ntfy_plan_ready(&meta.name, total))
+    } else if ps.retries < 1 {
+        ps.retries += 1;
+        ps.save(id).ok()?;
+        let _ = tmux::send_line(&meta.tmux, &m::plan_replan_instruction());
+        None
+    } else {
+        // The planner won't produce a plan — the human can write
+        // plan.md by hand and approve it.
+        ps.phase = PlanPhase::Ready;
+        ps.save(id).ok()?;
+        let _ = session::write_hook_state(id, krill_core::session::HookState::NeedsYou);
+        Some(m::ntfy_plan_no_plan(&meta.name))
+    }
+}
+
+/// What a duet Complete means: for a plain duet, done; for a running
+/// plan, commit the task, tick its box, and send the next one.
+fn duet_complete_note(worker: &SessionMeta) -> Option<String> {
+    match PlanState::load(&worker.id()) {
+        Ok(ps) if ps.phase == PlanPhase::Running => plan_next_task(worker, ps),
+        _ => Some(m::ntfy_duet_done(&worker.name)),
+    }
+}
+
+/// One task cleared the duet: check its box, commit box + work as one
+/// commit (task = commit), then start the next task or finish the plan.
+fn plan_next_task(worker: &SessionMeta, mut ps: PlanState) -> Option<String> {
+    let plan_path = worker.worktree.join("plan.md");
+    let md = std::fs::read_to_string(&plan_path).ok()?;
+    let finished = plan::first_open_task(&md);
+    if let Some(task) = &finished {
+        let _ = std::fs::write(&plan_path, plan::check_task(&md, task));
+    }
+    // Commit the task's work. Protocol files are krill's, not work, and
+    // the injected .claude/ settings never belong in history.
+    let _ = std::fs::remove_file(worker.worktree.join("REVIEW.md"));
+    let _ = std::fs::remove_file(worker.worktree.join("GATE.md"));
+    let _ = git::run(&worker.worktree, &["add", "-A", "--", ".", ":(exclude).claude"]);
+    if let Some(task) = &finished {
+        let _ = git::run(&worker.worktree, &["commit", "-m", &format!("plan: {task}")]);
+    }
+
+    let md = std::fs::read_to_string(&plan_path).ok()?;
+    let (done, total) = plan::progress(&md);
+    match plan::first_open_task(&md) {
+        Some(next) => {
+            // Fresh duet round for the next task.
+            DuetState::new(ps.max_rounds, &ps.gate, &next).save(&worker.id()).ok()?;
+            let _ = tmux::send_line(&worker.tmux, &m::plan_task_instruction(&next));
+            Some(m::ntfy_plan_progress(&worker.name, done, total))
+        }
+        None => {
+            ps.phase = PlanPhase::Done;
+            ps.save(&worker.id()).ok()?;
+            Some(m::ntfy_plan_done(&worker.name))
+        }
+    }
 }
 
 /// The duet referee (M5b): map this session's Done to an Event, run the
@@ -809,7 +1005,7 @@ fn advance_duet(id: &str) -> Option<String> {
         }
         Action::Complete => {
             let _ = std::fs::remove_file(&review_path);
-            Some(m::ntfy_duet_done(&worker.name))
+            duet_complete_note(&worker)
         }
         Action::Stall => {
             let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
@@ -849,7 +1045,7 @@ pub fn duet_gate(worker_id: &str) -> Result<()> {
     let Some(action) = action else { return Ok(()) };
     next.save(worker_id)?;
     let note = match action {
-        Action::Complete => Some(m::ntfy_duet_done(&worker.name)),
+        Action::Complete => duet_complete_note(&worker),
         Action::PingWorkerGate => {
             let _ = tmux::send_line(&worker.tmux, &m::duet_gate_fix_instruction(next.round, next.max_rounds));
             None
@@ -955,6 +1151,7 @@ pub fn remove_session(meta: &SessionMeta, force: bool) -> Result<Option<String>>
         }
         DuetState::delete(&meta.id());
     }
+    PlanState::delete(&meta.id());
     if tmux::has(&meta.tmux) {
         tmux::kill(&meta.tmux)?;
     }
