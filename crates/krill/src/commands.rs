@@ -294,3 +294,15 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
     println!("정리 완료: {}", meta.name);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::tmux_safe;
+
+    #[test]
+    fn tmux_safe_replaces_chars_tmux_dislikes() {
+        assert_eq!(tmux_safe("krill_web_fix-1"), "krill_web_fix-1");
+        assert_eq!(tmux_safe("a.b:c d"), "a-b-c-d");
+        assert_eq!(tmux_safe("한글x"), "--x");
+    }
+}

@@ -112,12 +112,17 @@ impl Config {
 
 /// Expand a leading `~` to the home directory.
 pub fn expand_tilde(p: &Path) -> PathBuf {
-    if let Ok(stripped) = p.strip_prefix("~") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
+    match std::env::var_os("HOME") {
+        Some(home) => expand_tilde_with(p, Path::new(&home)),
+        None => p.to_path_buf(),
     }
-    p.to_path_buf()
+}
+
+fn expand_tilde_with(p: &Path, home: &Path) -> PathBuf {
+    match p.strip_prefix("~") {
+        Ok(stripped) => home.join(stripped),
+        Err(_) => p.to_path_buf(),
+    }
 }
 
 // ---- tiny TOML-subset parser ------------------------------------------------
@@ -224,5 +229,99 @@ fn parse_value(raw: &str) -> Result<String> {
             let v = raw.split('#').next().unwrap_or("").trim();
             Ok(v.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_default_template() {
+        let c = parse(DEFAULT_CONFIG).unwrap();
+        assert_eq!(c.default_agent.as_deref(), Some("claude"));
+        assert_eq!(c.agents["claude"].cmd, "claude {prompt}");
+        assert!(c.agents["claude"].hooks.is_none()); // commented out
+        assert_eq!(c.agents["shell"].cmd, "");
+        assert!(c.agents.contains_key("codex") && c.agents.contains_key("gemini"));
+        assert!(c.repos.is_empty());
+    }
+
+    #[test]
+    fn parses_sections_keys_and_value_styles() {
+        let c = parse(
+            r##"
+default_agent = "a"
+future_key = "ignored"
+
+[agents.a]
+cmd = "a {prompt}"
+hooks = "claude-code"
+future = "ignored"
+
+[agents.b]
+cmd = 'literal "quoted"'
+
+[repos.web]
+path = "~/work/web"
+base = develop # trailing comment on a bare value
+
+[serve]
+port = 7777
+"##,
+        )
+        .unwrap();
+        assert_eq!(c.default_agent.as_deref(), Some("a"));
+        assert_eq!(c.agents["a"].hooks.as_deref(), Some("claude-code"));
+        assert_eq!(c.agents["b"].cmd, r#"literal "quoted""#);
+        assert_eq!(c.repos["web"].path, PathBuf::from("~/work/web"));
+        assert_eq!(c.repos["web"].base, "develop");
+        assert_eq!(c.repos.len(), 1); // [serve] ignored, not a repo
+    }
+
+    #[test]
+    fn parses_escapes_in_double_quotes() {
+        let c = parse("[agents.x]\ncmd = \"l1\\nl2\\t \\\"q\\\" back\\\\slash \\qkeep\"\n").unwrap();
+        assert_eq!(c.agents["x"].cmd, "l1\nl2\t \"q\" back\\slash \\qkeep");
+    }
+
+    #[test]
+    fn text_after_closing_quote_is_ignored() {
+        let c = parse("default_agent = \"x\"   # note\n").unwrap();
+        assert_eq!(c.default_agent.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        assert!(parse("[agents.x\ncmd = \"\"\n").is_err()); // unterminated section header
+        assert!(parse("just-a-token\n").is_err()); // not key = value
+        assert!(parse("x = \"unterminated\n").is_err()); // unclosed "
+        assert!(parse("x = 'unterminated\n").is_err()); // unclosed '
+        assert!(parse("x = \"abc\\").is_err()); // string ends on a bare backslash
+        assert!(parse("[repos.r]\nbase = main\n").is_err()); // repo without path
+    }
+
+    #[test]
+    fn resolve_agent_priority_and_errors() {
+        let c = parse("default_agent = \"b\"\n[agents.a]\ncmd = \"a\"\n[agents.b]\ncmd = \"b\"\n").unwrap();
+        assert_eq!(c.resolve_agent(Some("a")).unwrap().0, "a");
+        assert_eq!(c.resolve_agent(None).unwrap().0, "b");
+        assert!(c.resolve_agent(Some("zz")).is_err());
+
+        let sole = parse("[agents.only]\ncmd = \"x\"\n").unwrap();
+        assert_eq!(sole.resolve_agent(None).unwrap().0, "only");
+
+        let two_no_default = parse("[agents.a]\ncmd = \"\"\n[agents.b]\ncmd = \"\"\n").unwrap();
+        assert!(two_no_default.resolve_agent(None).is_err());
+        assert!(Config::default().resolve_agent(None).is_err());
+    }
+
+    #[test]
+    fn tilde_expansion() {
+        let home = Path::new("/home/u");
+        assert_eq!(expand_tilde_with(Path::new("~/w/x"), home), PathBuf::from("/home/u/w/x"));
+        assert_eq!(expand_tilde_with(Path::new("/abs/p"), home), PathBuf::from("/abs/p"));
+        assert_eq!(expand_tilde_with(Path::new("rel/p"), home), PathBuf::from("rel/p"));
+        assert_eq!(expand_tilde_with(Path::new("~user/x"), home), PathBuf::from("~user/x"));
     }
 }

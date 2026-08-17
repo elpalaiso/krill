@@ -59,3 +59,36 @@ impl<T> Context<T> for Option<T> {
         self.ok_or_else(|| Error(f()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boom() -> Result<()> {
+        crate::bail!("boom {}", 42)
+    }
+
+    #[test]
+    fn bail_formats() {
+        assert_eq!(boom().unwrap_err().to_string(), "boom 42");
+    }
+
+    #[test]
+    fn context_wraps_results_and_options() {
+        let r: std::result::Result<(), &str> = Err("inner");
+        assert_eq!(r.context("outer").unwrap_err().to_string(), "outer: inner");
+
+        let r2: std::result::Result<(), &str> = Err("inner");
+        assert_eq!(r2.with_context(|| format!("n={}", 1)).unwrap_err().to_string(), "n=1: inner");
+
+        let none: Option<u8> = None;
+        assert_eq!(none.context("need it").unwrap_err().to_string(), "need it");
+        assert_eq!(Some(7u8).context("unused").unwrap(), 7);
+    }
+
+    #[test]
+    fn io_error_converts() {
+        let e: Error = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
+        assert!(e.to_string().contains("gone"));
+    }
+}

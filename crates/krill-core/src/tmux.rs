@@ -95,3 +95,22 @@ pub fn attach_exec(name: &str) -> Result<()> {
     };
     Err(Error::msg(format!("tmux attach 실패: {err}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_syntax_exact_match_and_pane_colon() {
+        // Session commands use `=name`; pane commands need the trailing
+        // colon (`=name:`) — a real bug we shipped once (CLAUDE.md).
+        assert_eq!(target("fix"), "=fix");
+        assert_eq!(pane_target("fix"), "=fix:");
+    }
+
+    #[test]
+    fn server_sessions_never_panics_without_a_server() {
+        // With no tmux server (or no tmux at all) this must degrade to [].
+        let _ = server_sessions();
+    }
+}

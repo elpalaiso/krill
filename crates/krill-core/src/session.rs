@@ -1,7 +1,7 @@
 use crate::error::{Context, Result};
 use crate::{bail, kv};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
@@ -68,10 +68,12 @@ impl SessionMeta {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = self.meta_path()?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        self.save_in(&crate::sessions_dir()?)
+    }
+
+    fn save_in(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.kv", self.id()));
         kv::write_file(&path, &self.to_map())
             .with_context(|| format!("세션 메타 저장 실패: {}", path.display()))
     }
@@ -100,26 +102,38 @@ pub enum Health {
 }
 
 pub fn health(meta: &SessionMeta, live_sessions: &[String]) -> (Health, Option<u64>) {
-    if !live_sessions.iter().any(|s| s == &meta.tmux) {
+    let alive = live_sessions.iter().any(|s| s == &meta.tmux);
+    let age = if alive {
+        meta.log_path()
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs())
+    } else {
+        None
+    };
+    classify(alive, age)
+}
+
+/// Pure health rule: dead beats everything; ≤30s-old output = active.
+fn classify(alive: bool, age_secs: Option<u64>) -> (Health, Option<u64>) {
+    if !alive {
         return (Health::Dead, None);
     }
-    let age = meta
-        .log_path()
-        .ok()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs());
-    match age {
+    match age_secs {
         Some(a) if a <= 30 => (Health::Active, Some(a)),
         other => (Health::Quiet, other),
     }
 }
 
 pub fn load_all() -> Result<Vec<SessionMeta>> {
-    let dir = crate::sessions_dir()?;
+    load_all_from(&crate::sessions_dir()?)
+}
+
+fn load_all_from(dir: &Path) -> Result<Vec<SessionMeta>> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(out);
     };
     for entry in entries.flatten() {
@@ -137,7 +151,10 @@ pub fn load_all() -> Result<Vec<SessionMeta>> {
 
 /// Find a session by name (unique across repos, or disambiguate with repo).
 pub fn find(name: &str, repo: Option<&str>) -> Result<SessionMeta> {
-    let all = load_all()?;
+    find_among(load_all()?, name, repo)
+}
+
+fn find_among(all: Vec<SessionMeta>, name: &str, repo: Option<&str>) -> Result<SessionMeta> {
     let matches: Vec<_> = all
         .into_iter()
         .filter(|m| m.name == name && repo.map_or(true, |r| m.repo_name == r))
@@ -153,5 +170,106 @@ pub fn find(name: &str, repo: Option<&str>) -> Result<SessionMeta> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(name: &str, repo: &str, created: u64) -> SessionMeta {
+        SessionMeta {
+            name: name.into(),
+            repo_name: repo.into(),
+            repo_path: PathBuf::from("/tmp/repo"),
+            base: "main".into(),
+            branch: format!("krill/{name}"),
+            worktree: PathBuf::from("/tmp/wt").join(name),
+            agent: "shell".into(),
+            cmd: "claude 'do it'\nsecond line".into(),
+            tmux: format!("krill_{repo}_{name}"),
+            created_unix: created,
+        }
+    }
+
+    #[test]
+    fn id_combines_repo_and_name() {
+        assert_eq!(meta("fix", "web", 1).id(), "web--fix");
+    }
+
+    #[test]
+    fn map_roundtrip_preserves_every_field() {
+        let m = meta("fix", "web", 42);
+        let back = SessionMeta::from_map(&m.to_map()).unwrap();
+        assert_eq!(back.name, m.name);
+        assert_eq!(back.repo_name, m.repo_name);
+        assert_eq!(back.repo_path, m.repo_path);
+        assert_eq!(back.base, m.base);
+        assert_eq!(back.branch, m.branch);
+        assert_eq!(back.worktree, m.worktree);
+        assert_eq!(back.agent, m.agent);
+        assert_eq!(back.cmd, m.cmd);
+        assert_eq!(back.tmux, m.tmux);
+        assert_eq!(back.created_unix, m.created_unix);
+    }
+
+    #[test]
+    fn from_map_defaults_cmd_but_requires_the_rest() {
+        let mut no_cmd = meta("a", "r", 1).to_map();
+        no_cmd.remove("cmd");
+        assert_eq!(SessionMeta::from_map(&no_cmd).unwrap().cmd, "");
+
+        let mut no_branch = meta("a", "r", 1).to_map();
+        no_branch.remove("branch");
+        assert!(SessionMeta::from_map(&no_branch).is_err());
+
+        let mut bad_time = meta("a", "r", 1).to_map();
+        bad_time.insert("created_unix".into(), "NaN".into());
+        assert!(SessionMeta::from_map(&bad_time).is_err());
+    }
+
+    #[test]
+    fn store_roundtrip_skips_corrupt_and_sorts_newest_first() {
+        let dir = std::env::temp_dir().join(format!("krill-test-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        meta("old", "web", 100).save_in(&dir).unwrap();
+        meta("new", "web", 200).save_in(&dir).unwrap();
+        std::fs::write(dir.join("broken.kv"), "name=only-a-name\n").unwrap();
+        std::fs::write(dir.join("not-meta.txt"), "ignored\n").unwrap();
+
+        let all = load_all_from(&dir).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "new"); // newest first
+        assert_eq!(all[1].name, "old");
+        assert_eq!(all[1].cmd, "claude 'do it'\nsecond line"); // kv escaping roundtrips
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_all_from_missing_dir_is_empty() {
+        let dir = std::env::temp_dir().join(format!("krill-test-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(load_all_from(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn find_among_unique_ambiguous_and_filtered() {
+        let all = vec![meta("a", "r1", 1), meta("a", "r2", 2), meta("b", "r1", 3)];
+        assert!(find_among(all.clone(), "missing", None).is_err());
+        assert_eq!(find_among(all.clone(), "b", None).unwrap().repo_name, "r1");
+        assert!(find_among(all.clone(), "a", None).is_err()); // two repos have "a"
+        assert_eq!(find_among(all.clone(), "a", Some("r2")).unwrap().repo_name, "r2");
+        assert!(find_among(all, "b", Some("r2")).is_err());
+    }
+
+    #[test]
+    fn classify_health_states() {
+        assert_eq!(classify(false, None), (Health::Dead, None));
+        assert_eq!(classify(true, Some(0)), (Health::Active, Some(0)));
+        assert_eq!(classify(true, Some(30)), (Health::Active, Some(30)));
+        assert_eq!(classify(true, Some(31)), (Health::Quiet, Some(31)));
+        assert_eq!(classify(true, None), (Health::Quiet, None));
     }
 }

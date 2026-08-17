@@ -118,7 +118,11 @@ pub fn branch_delete(repo: &Path, branch: &str, force: bool) -> Result<()> {
 /// Compact "+ins −del" summary of a worktree (including uncommitted
 /// changes) vs its base, or "clean".
 pub fn shortstat(wt: &Path, base: &str) -> String {
-    let s = run(wt, &["diff", "--shortstat", base]).unwrap_or_default();
+    parse_shortstat(&run(wt, &["diff", "--shortstat", base]).unwrap_or_default())
+}
+
+/// Parse `git diff --shortstat` output ("" = no changes).
+fn parse_shortstat(s: &str) -> String {
     let (mut files, mut ins, mut del) = (0u64, 0u64, 0u64);
     for part in s.split(',') {
         let part = part.trim();
@@ -139,5 +143,18 @@ pub fn shortstat(wt: &Path, base: &str) -> String {
         "clean".into()
     } else {
         format!("+{ins} −{del}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortstat_parsing() {
+        assert_eq!(parse_shortstat(""), "clean");
+        assert_eq!(parse_shortstat("3 files changed, 10 insertions(+), 2 deletions(-)"), "+10 −2");
+        assert_eq!(parse_shortstat("1 file changed, 5 insertions(+)"), "+5 −0");
+        assert_eq!(parse_shortstat("2 files changed, 4 deletions(-)"), "+0 −4");
     }
 }
