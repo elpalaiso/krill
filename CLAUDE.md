@@ -24,8 +24,15 @@ web/assets에 벤더링, 스냅샷 → 로그 tail 스트림, 키입력은 send-
 (/api/diff, 512KB 캡). tokio/axum/serde는 바이너리 크레이트에만, 정적
 자산은 include_str!(rust-embed 불필요).
 
-다음 마일스톤 순서:
-M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → M5 듀엣(턴제
+M3a 완료(설계 DESIGN.md §6.1): 훅은 http가 아니라 **파일 기반** — `krill new`가
+worktree에 .claude/settings.local.json을 주입(current_exe 절대 경로,
+기존 파일은 존중)하고, 에이전트 훅이 `krill hook <needs-you|done> -i <id>`로
+`state/<id>.kv`를 쓴다. 상태 판정: dead > (훅이 마지막 출력보다 새로우면
+needs-you/done) > 30초 휴리스틱 — 출력이 재개되면 자동으로 훅 상태를 벗어난다.
+Status 5종(needs-you ◆ / active ● / quiet ◌ / done ✓ / dead ✖)을 ls/TUI/웹이
+공유. 남은 M3b: ntfy 푸시(hook에서 curl 위임), M3c: merge/pr 커맨드.
+
+다음 마일스톤 순서: M3 마무리(M3b/c) → M4 릴리스 CI/brew → M5 듀엣(턴제
 교차모델 리뷰, docs/DESIGN.md §12).
 
 ## 설계 원칙 (요약 — 상세는 DESIGN.md §4)

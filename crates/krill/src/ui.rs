@@ -10,7 +10,7 @@ use crate::msg as m;
 use krill_core::config::Config;
 use krill_core::error::Result;
 use krill_core::git;
-use krill_core::session::{self, Health, SessionMeta};
+use krill_core::session::{self, SessionMeta, Status};
 use krill_core::tmux;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -27,7 +27,7 @@ const DIFF_CACHE_TTL: Duration = Duration::from_secs(5);
 
 struct Row {
     meta: SessionMeta,
-    health: Health,
+    health: Status,
     age: Option<u64>,
     diff: String,
 }
@@ -40,19 +40,24 @@ enum Item {
     Row(usize),
 }
 
-fn state_rank(h: Health) -> u8 {
+/// §8.1 sort priority: needs-you first, dead last.
+fn state_rank(h: Status) -> u8 {
     match h {
-        Health::Active => 0,
-        Health::Quiet => 1,
-        Health::Dead => 2,
+        Status::NeedsYou => 0,
+        Status::Active => 1,
+        Status::Quiet => 2,
+        Status::Done => 3,
+        Status::Dead => 4,
     }
 }
 
-fn icon(h: Health) -> (&'static str, Color) {
+fn icon(h: Status) -> (&'static str, Color) {
     match h {
-        Health::Active => ("●", Color::Green),
-        Health::Quiet => ("◌", Color::Yellow),
-        Health::Dead => ("✖", Color::Red),
+        Status::NeedsYou => ("◆", Color::Magenta),
+        Status::Active => ("●", Color::Green),
+        Status::Quiet => ("◌", Color::Yellow),
+        Status::Done => ("✓", Color::Blue),
+        Status::Dead => ("✖", Color::Red),
     }
 }
 
@@ -299,8 +304,8 @@ impl App {
             if !matches_filter(&meta.name, &self.filter) {
                 continue;
             }
-            let (health, age) = session::health(&meta, &live);
-            let diff = if health == Health::Dead {
+            let (health, age) = session::status(&meta, &live);
+            let diff = if health == Status::Dead {
                 "-".into()
             } else {
                 self.diff_stat(&meta)
@@ -332,7 +337,7 @@ impl App {
     fn update_preview(&mut self) {
         self.preview = match self.rows.get(self.selected) {
             None => Vec::new(),
-            Some(r) if r.health == Health::Dead => vec![Line::raw(m::attach_dead(&r.meta.name))],
+            Some(r) if r.health == Status::Dead => vec![Line::raw(m::attach_dead(&r.meta.name))],
             Some(r) => match tmux::capture_pane_ansi(&r.meta.tmux) {
                 Ok(text) if !text.is_empty() => ansi::parse(&text),
                 _ => vec![Line::raw(m::tui_no_output())],
@@ -516,7 +521,7 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if let Some(r) = self.rows.get(self.selected) {
-                            if r.health != Health::Dead {
+                            if r.health != Status::Dead {
                                 return Ok(Action::Attach(r.meta.tmux.clone()));
                             }
                         }
@@ -754,7 +759,7 @@ pub fn run() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn row(name: &str, repo: &str, health: Health, age: Option<u64>, created: u64) -> Row {
+    fn row(name: &str, repo: &str, health: Status, age: Option<u64>, created: u64) -> Row {
         Row {
             meta: SessionMeta {
                 name: name.into(),
@@ -781,11 +786,11 @@ mod tests {
     #[test]
     fn sort_state_priority_then_recent_activity() {
         let mut rows = vec![
-            row("dead-new", "a", Health::Dead, None, 300),
-            row("quiet", "a", Health::Quiet, Some(120), 100),
-            row("active-old", "a", Health::Active, Some(20), 50),
-            row("active-hot", "a", Health::Active, Some(2), 10),
-            row("dead-old", "a", Health::Dead, None, 200),
+            row("dead-new", "a", Status::Dead, None, 300),
+            row("quiet", "a", Status::Quiet, Some(120), 100),
+            row("active-old", "a", Status::Active, Some(20), 50),
+            row("active-hot", "a", Status::Active, Some(2), 10),
+            row("dead-old", "a", Status::Dead, None, 200),
         ];
         sort_rows(&mut rows);
         assert_eq!(names(&rows), ["active-hot", "active-old", "quiet", "dead-new", "dead-old"]);
@@ -794,8 +799,8 @@ mod tests {
     #[test]
     fn sort_groups_by_repo_first() {
         let mut rows = vec![
-            row("z", "web", Health::Active, Some(1), 1),
-            row("a", "api", Health::Dead, None, 1),
+            row("z", "web", Status::Active, Some(1), 1),
+            row("a", "api", Status::Dead, None, 1),
         ];
         sort_rows(&mut rows);
         assert_eq!(names(&rows), ["a", "z"]); // repo "api" group before "web"
@@ -804,8 +809,8 @@ mod tests {
     #[test]
     fn headers_only_with_multiple_repos() {
         let mut multi = vec![
-            row("s1", "api", Health::Active, Some(1), 1),
-            row("s2", "web", Health::Active, Some(1), 1),
+            row("s1", "api", Status::Active, Some(1), 1),
+            row("s2", "web", Status::Active, Some(1), 1),
         ];
         sort_rows(&mut multi);
         assert_eq!(
@@ -818,17 +823,21 @@ mod tests {
             ]
         );
 
-        let single = vec![row("s1", "api", Health::Active, Some(1), 1)];
+        let single = vec![row("s1", "api", Status::Active, Some(1), 1)];
         assert_eq!(build_items(&single), vec![Item::Row(0)]);
     }
 
     #[test]
     fn icons_and_ranks_cover_all_states() {
-        assert!(state_rank(Health::Active) < state_rank(Health::Quiet));
-        assert!(state_rank(Health::Quiet) < state_rank(Health::Dead));
-        assert_eq!(icon(Health::Active).0, "●");
-        assert_eq!(icon(Health::Quiet).0, "◌");
-        assert_eq!(icon(Health::Dead).0, "✖");
+        assert!(state_rank(Status::NeedsYou) < state_rank(Status::Active));
+        assert!(state_rank(Status::Active) < state_rank(Status::Quiet));
+        assert!(state_rank(Status::Quiet) < state_rank(Status::Done));
+        assert!(state_rank(Status::Done) < state_rank(Status::Dead));
+        assert_eq!(icon(Status::NeedsYou).0, "◆");
+        assert_eq!(icon(Status::Active).0, "●");
+        assert_eq!(icon(Status::Quiet).0, "◌");
+        assert_eq!(icon(Status::Done).0, "✓");
+        assert_eq!(icon(Status::Dead).0, "✖");
     }
 
     #[test]

@@ -81,6 +81,37 @@ Cargo workspace 두 개의 crate로 나눈다. `krill-core`(라이브러리: 세
 
 여기서 가장 중요한 기술적 발견: **Claude Code는 훅(hooks)에 `type: "http"`를 지원한다.** 즉 krill의 어댑터 프리셋이 worktree의 `.claude/settings.local.json`에 `Notification`(matcher: `permission_prompt|idle_prompt`), `Stop`, `SessionEnd` 훅을 심어두면, 에이전트가 승인을 기다리는 바로 그 순간 krill의 로컬 엔드포인트(`/api/hook`)로 JSON POST가 날아온다. 화면을 긁어 추측하는 게 아니라 에이전트가 직접 알려주는 것이다. 훅이 없는 에이전트는 출력 휴리스틱으로 폴백한다. "폰에서 알림 받고 → 열어서 승인" 흐름의 정확도가 여기서 나온다.
 
+### 6.1 훅 구현 설계 (M3) — 파일 기반 결정
+
+§6의 발견(Claude Code의 `type: "http"` 훅)은 유효하지만, **구현은 `type:
+"command"` + 상태 파일을 채택한다.** 이유는 원칙 3이다: http 훅은 수신할
+서버(`krill serve`)가 떠 있어야만 동작하는데, TUI만 쓰는 사용자에게도 정확
+상태가 보여야 한다. command 훅이 `krill hook <state> -i <id>`를 실행해
+`~/.local/share/krill/state/<id>.kv`를 쓰면 상주 프로세스 0으로 같은 정보가
+전달되고, TUI/ls/웹 모두 이 파일을 읽는다. ntfy 푸시(M3b)도 같은 훅에서
+직접 보내므로 푸시조차 서버가 필요 없다.
+
+**주입.** `krill new`가 `[agents.*] hooks = "claude-code"`인 에이전트를 띄울
+때 worktree의 `.claude/settings.local.json`을 생성한다(이미 있으면 리포의
+것을 존중하고 건너뜀 — 파일이 gitignore 대상이라 신선한 worktree에는 보통
+없다). 훅 명령은 `current_exe()`의 절대 경로를 써서 PATH 의존을 없앤다.
+Notification → `needs-you`, Stop/SessionEnd → `done`.
+
+**상태 판정 규칙** (`session::classify`, 순수 함수):
+
+1. tmux 세션 소멸 → **dead** (훅보다 우선).
+2. 훅 상태 파일이 마지막 출력 이후에 갱신됐으면(mtime 비교, `hook_age <=
+   log_age`) → **needs-you** / **done**. 에이전트가 다시 출력을 내면 로그가
+   더 새로워져 자동으로 훅 상태를 벗어난다 — 상태 리셋 훅이 따로 필요 없다.
+3. 그 외 → 30초 휴리스틱 (**active** / **quiet**).
+
+훅 없는 에이전트는 2를 건너뛰므로 기존 동작 그대로다. 정렬 우선순위는
+needs-you > active > quiet > done > dead.
+
+**슬라이스.** M3a: 상태 확장 + 주입 + `krill hook`(위 전부). M3b: ntfy —
+`krill hook`이 config `[notify] ntfy_topic`으로 POST(curl 위임, 새 의존성
+0). M3c: `merge`/`pr` 커맨드(git merge / branch push + gh 위임).
+
 ## 7. 원격 접속 설계 — "같은 네트워크가 아니어도"
 
 요구사항은 두 가지가 충돌하는 것처럼 보인다: 어디서든 접속돼야 하지만, 릴레이 서버·계정·TLS 인증서를 우리가 운영하면 무거워진다. 해법은 **네트워크 계층을 통째로 위임하는 3단 구성**이다.

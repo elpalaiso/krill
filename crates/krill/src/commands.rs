@@ -3,7 +3,7 @@ use krill_core::bail;
 use krill_core::config::Config;
 use krill_core::error::{Context, Result};
 use krill_core::git;
-use krill_core::session::{self, Health, SessionMeta};
+use krill_core::session::{self, SessionMeta, Status};
 use krill_core::tmux;
 use std::io::Write as _;
 use std::process::Command;
@@ -11,6 +11,8 @@ use std::process::Command;
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
+const MAGENTA: &str = "\x1b[35m";
+const BLUE: &str = "\x1b[34m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
@@ -106,6 +108,18 @@ pub fn create_session(
     git::worktree_add(&repo_ref.path, &worktree, &branch, &base)
         .with_context(|| m::worktree_create_failed(&base))?;
 
+    // Hook preset (M3): agents that support hooks get NeedsYou/Done
+    // reporting injected into their worktree before they start.
+    let session_id = format!("{}--{}", repo_ref.name, name);
+    if agent_cfg.hooks.as_deref() == Some("claude-code") {
+        if let Err(e) = inject_claude_hooks(&worktree, &session_id) {
+            // Roll back like a failed spawn — no half-made sessions.
+            let _ = git::worktree_remove(&repo_ref.path, &worktree, true);
+            let _ = git::branch_delete(&repo_ref.path, &branch, true);
+            return Err(e);
+        }
+    }
+
     // Build the agent command line.
     let cmd = match message {
         Some(msg) => {
@@ -185,15 +199,17 @@ pub fn ls() -> Result<()> {
 
     let mut rows = Vec::new();
     for m in &metas {
-        let (h, age) = session::health(m, &live);
+        let (h, age) = session::status(m, &live);
         let (dot, state) = match h {
-            Health::Active => (format!("{GREEN}●{RESET}"), "active".to_string()),
-            Health::Quiet => (format!("{YELLOW}●{RESET}"), "quiet".to_string()),
-            Health::Dead => (format!("{RED}✖{RESET}"), "dead".to_string()),
+            Status::NeedsYou => (format!("{MAGENTA}◆{RESET}"), "needs-you".to_string()),
+            Status::Active => (format!("{GREEN}●{RESET}"), "active".to_string()),
+            Status::Quiet => (format!("{YELLOW}●{RESET}"), "quiet".to_string()),
+            Status::Done => (format!("{BLUE}✓{RESET}"), "done".to_string()),
+            Status::Dead => (format!("{RED}✖{RESET}"), "dead".to_string()),
         };
-        let attached = h != Health::Dead && tmux::attached_count(&m.tmux) > 0;
+        let attached = h != Status::Dead && tmux::attached_count(&m.tmux) > 0;
         let last = age.map(krill_core::fmt_age).unwrap_or_else(|| "-".into());
-        let diff = if h == Health::Dead {
+        let diff = if h == Status::Dead {
             "-".to_string()
         } else {
             git::shortstat(&m.worktree, &m.base)
@@ -327,6 +343,55 @@ pub fn rm(name: &str, repo: Option<&str>, force: bool) -> Result<()> {
     }
     println!("{}", m::rm_done(&meta.name));
     Ok(())
+}
+
+/// Claude Code settings.local.json with command hooks that report
+/// session state back to krill (design §6.1 — file-based, no server).
+fn hook_settings_json(id: &str, exe: &str) -> String {
+    let cmd = |state: &str| format!("{exe} hook {state} -i {id}");
+    serde_json::json!({
+        "hooks": {
+            "Notification": [
+                { "hooks": [{ "type": "command", "command": cmd("needs-you") }] }
+            ],
+            "Stop": [
+                { "hooks": [{ "type": "command", "command": cmd("done") }] }
+            ],
+            "SessionEnd": [
+                { "hooks": [{ "type": "command", "command": cmd("done") }] }
+            ]
+        }
+    })
+    .to_string()
+}
+
+/// Write the hook preset into the worktree. An existing
+/// settings.local.json is left untouched (the repo owns it).
+fn inject_claude_hooks(worktree: &std::path::Path, id: &str) -> Result<()> {
+    let dir = worktree.join(".claude");
+    let path = dir.join("settings.local.json");
+    if path.exists() {
+        eprintln!("{}", m::hook_settings_exists(&path.display().to_string()));
+        return Ok(());
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "krill".into());
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, hook_settings_json(id, &exe))?;
+    Ok(())
+}
+
+/// `krill hook <state> -i <id>` — called by agent hooks, writes the
+/// state file that status() layers over the activity heuristic. The
+/// hook payload on stdin is drained and discarded (M3a).
+pub fn hook(state: &str, id: &str) -> Result<()> {
+    let Some(hs) = krill_core::session::HookState::parse(state) else {
+        bail!(m::hook_usage());
+    };
+    let mut sink = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut sink);
+    session::write_hook_state(id, hs)
 }
 
 /// Kill tmux + remove worktree + delete branch + drop meta. Returns a
