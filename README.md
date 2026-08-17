@@ -25,6 +25,20 @@ KRILL_LANG=en krill ls              # 1회성 강제
 고정하려면 `~/.config/krill/config.toml`에 `lang = "ko"` (또는 `"en"`).
 우선순위: `KRILL_LANG` > config `lang` > `LC_ALL`/`LC_MESSAGES`/`LANG` > en.
 
+## 설치
+
+```sh
+# Homebrew (이 리포가 곧 tap)
+brew tap elpalaiso/krill https://github.com/elpalaiso/krill
+brew install --HEAD elpalaiso/krill/krill
+
+# 또는 소스에서 (릴리스 바이너리 ~2MB)
+cargo install --path crates/krill
+```
+
+태그(v*)를 푸시하면 GitHub Actions가 4개 플랫폼(linux/mac × x86_64/arm64)
+바이너리를 릴리스에 첨부합니다.
+
 ## 빠른 시작
 
 ```sh
@@ -58,7 +72,7 @@ krill new review-login -a codex --from fix-login \
 | M1 | TUI 대시보드 (ratatui), 상태 휴리스틱 | ✅ |
 | M2 | `krill serve`: 웹 UI + Tailscale 원격 접속 | ✅ (`--expose`만 후순위) |
 | M3 | Claude Code 훅 연동(NeedsYou 정확 감지), ntfy 푸시, merge/pr | ✅ |
-| M4 | 릴리스 CI, Homebrew tap | ⬜ |
+| M4 | 릴리스 CI, Homebrew tap | ✅ (첫 태그 릴리스 대기) |
 | M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰) | ⬜ |
 
 ## 라이선스
