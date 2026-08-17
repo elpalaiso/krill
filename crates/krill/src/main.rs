@@ -37,11 +37,18 @@ fn run() -> Result<()> {
         "new" => {
             let o = args::parse(
                 rest,
-                &[("-a", "--agent"), ("-r", "--repo"), ("-m", "--message"), ("", "--from")],
+                &[("-a", "--agent"), ("-r", "--repo"), ("-m", "--message"), ("", "--from"), ("", "--flow")],
                 &[],
             )?;
             let name = o.pos.first().context(msg::name_required("new"))?;
-            commands::new(name, o.val("--agent"), o.val("--repo"), o.val("--message"), o.val("--from"))
+            commands::new(
+                name,
+                o.val("--agent"),
+                o.val("--repo"),
+                o.val("--message"),
+                o.val("--from"),
+                o.val("--flow"),
+            )
         }
         "attach" => {
             let o = args::parse(rest, &[("-r", "--repo")], &[])?;

@@ -44,7 +44,19 @@ M4 완료: CI(.github/workflows/ci.yml — push/PR마다 빌드+테스트), 릴�
 (xterm.js 내장 + tokio/axum/ratatui 포함 — 목표 10MB의 1/5).
 릴리스 절차: 버전 올리고 `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-다음 마일스톤: M5 듀엣(턴제 교차모델 리뷰, docs/DESIGN.md §12).
+M5a 완료(설계 DESIGN.md §12.1): flow 자동 체인 — config `[flows.<name>.<n>]`
+번호 섹션(수제 파서 변경 없음, 스테이지 1..N 연속 강제), `krill new <이름>
+--flow <flow> -m "목표"`가 `<이름>-1`을 만들고, `krill hook done`이 메타의
+flow 필드를 보고 다음 스테이지를 `--from` 릴레이로 자동 스폰 — 체인 엔진이
+훅 안에 있어 데몬 0 유지. Stop은 턴마다 발화하므로 다음 세션이 이미 있으면
+무시(멱등 판정은 `session::flow_next` 순수 함수). 스폰 실패·unknown flow는
+훅을 실패시키지 않고 stderr/ntfy로 보고. 훅 없는 에이전트가 마지막 외
+스테이지에 있으면 시작 시 경고. 훅의 repo 해석은 worktree cwd가 아니라
+meta.repo_path 기준(create_session_full의 `at` 씸). ls는 FLOW 컬럼(flow
+세션이 있을 때만), TUI는 미리보기 타이틀에 `flow:stage` 표시.
+
+다음 마일스톤: M5b 듀엣(턴제 핑퐁 — 공유 worktree, REVIEW.md 프로토콜,
+gate, 라운드 캡), M5c planner+plan.md 순회. docs/DESIGN.md §12.1.
 
 ## 설계 원칙 (요약 — 상세는 DESIGN.md §4)
 

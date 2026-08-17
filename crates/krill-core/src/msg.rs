@@ -46,6 +46,10 @@ crate::messages! {
         en: "[repos.{name}] has no path",
         ko: "[repos.{name}]에 path가 없습니다",
     }
+    cfg_flow_stages_not_contiguous(name: &str) => {
+        en: "[flows.{name}] stages must be numbered 1..N without gaps",
+        ko: "[flows.{name}] 스테이지 번호는 1부터 빠짐없이 이어져야 합니다",
+    }
     cfg_trailing_backslash() => {
         en: "string ends on a bare \\",
         ko: "문자열이 \\ 로 끝났습니다",
@@ -117,6 +121,10 @@ crate::messages! {
     session_ambiguous(name: &str, repos: &str) => {
         en: "session '{name}' exists in multiple repos ({repos}). pick one with -r <repo>.",
         ko: "'{name}' 세션이 여러 리포에 있습니다 ({repos}). -r <리포>로 지정하세요.",
+    }
+    meta_flow_stage_parse_failed() => {
+        en: "failed to parse flow_stage",
+        ko: "flow_stage 파싱 실패",
     }
 }
 

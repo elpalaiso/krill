@@ -63,6 +63,14 @@ krill new review-login -a codex --from fix-login \
     -m "이 브랜치의 변경을 리뷰하고 버그를 수정해"
 ```
 
+flow — 릴레이를 자동화한 체인. 스테이지가 Done이 되면(훅) 다음 스테이지가
+이전 브랜치를 이어받아 자동 시작됩니다:
+
+```sh
+# config.toml: [flows.shipit.1] 구현 → [flows.shipit.2] 리뷰 (codex)
+krill new fix-login --flow shipit -m "로그인 버그 고쳐줘"
+```
+
 ## 로드맵
 
 | 단계 | 내용 | 상태 |
@@ -73,7 +81,7 @@ krill new review-login -a codex --from fix-login \
 | M2 | `krill serve`: 웹 UI + Tailscale 원격 접속 | ✅ (`--expose`만 후순위) |
 | M3 | Claude Code 훅 연동(NeedsYou 정확 감지), ntfy 푸시, merge/pr | ✅ |
 | M4 | 릴리스 CI, Homebrew tap | ✅ (첫 태그 릴리스 대기) |
-| M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰) | ⬜ |
+| M5 | 협업 모드: flow 자동 체인, 듀엣(턴제 교차모델 리뷰) | 🟡 (flow 체인 ✅, 듀엣 ⬜) |
 
 ## 라이선스
 
