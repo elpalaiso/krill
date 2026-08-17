@@ -232,8 +232,9 @@ TUI는 단일 화면이다. 왼쪽에 세션 목록(상태 아이콘, 에이전�
 ### 8.2 serve 상세 설계 (M2)
 
 서버는 무상태다 — 매 요청마다 tmux + 메타파일에서 재구성하므로(원칙 3) serve가
-죽어도 잃는 것이 없고, TUI와 같은 코어 함수를 공유한다. 정적 자산은 M2a에서는
-`include_str!`로 충분(파일 1개), xterm.js가 들어오는 M2b부터 rust-embed를 도입한다.
+죽어도 잃는 것이 없고, TUI와 같은 코어 함수를 공유한다. 정적 자산은 3파일
+(index.html + 벤더링한 xterm.js/css)이라 `include_str!`로 충분 — rust-embed는
+파일이 더 늘 때까지 도입하지 않는다(원칙 4).
 
 **API (M2a 기준).**
 
@@ -242,6 +243,8 @@ TUI는 단일 화면이다. 왼쪽에 세션 목록(상태 아이콘, 에이전�
 | `GET /` | 내장 index.html (카드 목록 + 미리보기, vanilla JS) |
 | `GET /api/sessions` | `[{name, repo, agent, state, age, diff}]` — 2초 폴링 |
 | `GET /api/preview/{repo}/{name}` | 현재 pane 텍스트 (capture-pane). 404 = 없음, 410 = tmux 죽음 |
+| `GET /ws/{repo}/{name}` | 웹소켓 터미널(M2b): 접속 시 capture-pane -e 스냅샷(Text) → pipe-pane 로그 tail 스트림(Binary, 250ms 폴링) / 키입력은 Text로 받아 send-keys -l |
+| `GET /assets/xterm.{js,css}` | 벤더링된 xterm.js 5.5 (무인증 — 세션 데이터 없음) |
 
 **인증 (§7의 구현).** 규칙은 코드에 고정: `bind`가 loopback이 아니면 config
 `[serve] token` 없이는 기동을 거부한다. 토큰이 설정되면 모든 요청이
@@ -249,11 +252,13 @@ TUI는 단일 화면이다. 왼쪽에 세션 목록(상태 아이콘, 에이전�
 `?token=`을 읽어 API 호출에 이어붙인다. TLS는 구현하지 않는다 — tailscale
 serve/역프록시에 위임(§7).
 
-**슬라이스.** M2a: 읽기 전용 — 카드 목록 + 텍스트 미리보기 + 토큰 인증
-(위 표 전부). M2b: 상호작용 — WebSocket + xterm.js 터미널(읽기+입력),
-rust-embed 도입, `--bind tailscale` 키워드(tailscale ip 자동 감지).
-M2c: 폴리시 — 퀵 리플라이 버튼(y/Enter 등, M3 NeedsYou의 전신), diff 뷰,
-`--expose`(funnel/cloudflared 감지 연동).
+**슬라이스.** M2a(완료): 읽기 전용 — 카드 목록 + 텍스트 미리보기 + 토큰 인증.
+M2b(완료): 상호작용 — WebSocket + xterm.js 터미널(읽기+입력, 80×24 고정 — §13),
+`--bind tailscale` 키워드(`tailscale ip -4` 자동 감지). 스트림 구조: 접속 시
+현재 화면 스냅샷을 먼저 보내 mid-stream 깨짐을 막고, 이후는 pipe-pane 로그의
+새 바이트만 따라간다(UTF-8 경계가 깨질 수 있어 Binary 프레임). M2c: 폴리시 —
+퀵 리플라이 버튼(y/Enter 등, M3 NeedsYou의 전신), diff 뷰, `--expose`
+(funnel/cloudflared 감지 연동).
 
 블로킹 작업(tmux/git 서브프로세스)은 전부 `spawn_blocking`으로 실행자 밖에서.
 웹 터미널 리사이즈 문제(§13)는 M2b에서 "웹 뷰 80×24 고정"으로 단순화한다.

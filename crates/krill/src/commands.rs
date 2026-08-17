@@ -272,11 +272,31 @@ pub fn diff_worktree(worktree: &std::path::Path, base: &str, stat: bool, hold_pa
     Ok(())
 }
 
+/// First line of a command's stdout ("" if none).
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// `--bind tailscale`: ask the tailscale CLI for this machine's tailnet
+/// IPv4 (design §7 — bind only the tailnet, expose nothing public).
+fn tailscale_ip() -> Result<String> {
+    let out = Command::new("tailscale")
+        .args(["ip", "-4"])
+        .output()
+        .context(m::tailscale_failed())?;
+    let ip = first_line(&String::from_utf8_lossy(&out.stdout));
+    if !out.status.success() || ip.is_empty() {
+        bail!(m::tailscale_failed());
+    }
+    Ok(ip)
+}
+
 /// `krill serve` — flags override config `[serve]`; the token comes
 /// from the config only (keeps it out of shell history).
 pub fn serve(bind: Option<&str>, port: Option<&str>) -> Result<()> {
     let cfg = Config::load()?.serve;
     let bind = bind.unwrap_or(&cfg.bind).to_string();
+    let bind = if bind == "tailscale" { tailscale_ip()? } else { bind };
     let port: u16 = match port {
         Some(p) => p.parse().ok().ok_or_else(|| {
             krill_core::error::Error::msg(m::serve_bad_port(p))
@@ -331,12 +351,19 @@ pub fn remove_session(meta: &SessionMeta, force: bool) -> Result<Option<String>>
 
 #[cfg(test)]
 mod tests {
-    use super::tmux_safe;
+    use super::{first_line, tmux_safe};
 
     #[test]
     fn tmux_safe_replaces_chars_tmux_dislikes() {
         assert_eq!(tmux_safe("krill_web_fix-1"), "krill_web_fix-1");
         assert_eq!(tmux_safe("a.b:c d"), "a-b-c-d");
         assert_eq!(tmux_safe("한글x"), "--x");
+    }
+
+    #[test]
+    fn first_line_trims_and_defaults() {
+        assert_eq!(first_line("100.101.1.2\nfe80::1\n"), "100.101.1.2");
+        assert_eq!(first_line("  spaced  \nrest"), "spaced");
+        assert_eq!(first_line(""), "");
     }
 }

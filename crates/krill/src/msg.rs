@@ -29,7 +29,7 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill rm <이름> [-f|--force]        세션 · worktree · 브랜치 정리
-  krill serve [-b <주소>] [-p <포트>]  웹 UI (기본 127.0.0.1:7777, config [serve])
+  krill serve [-b <주소>|tailscale] [-p <포트>]  웹 UI (기본 127.0.0.1:7777)
   krill --help | --version
 
 예시:
@@ -56,7 +56,7 @@ usage:
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill rm <name> [-f|--force]        remove session · worktree · branch
-  krill serve [-b <addr>] [-p <port>]  web UI (default 127.0.0.1:7777, config [serve])
+  krill serve [-b <addr>|tailscale] [-p <port>]  web UI (default 127.0.0.1:7777)
   krill --help | --version
 
 examples:
@@ -270,6 +270,10 @@ messages! {
     serve_start_failed() => {
         en: "failed to start the web server",
         ko: "웹 서버 시작 실패",
+    }
+    tailscale_failed() => {
+        en: "failed to resolve the tailscale address (is tailscale installed and up?)",
+        ko: "tailscale 주소를 확인할 수 없습니다 (tailscale이 설치·실행 중인가요?)",
     }
 }
 

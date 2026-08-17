@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>krill</title>
+<link rel="stylesheet" href="/assets/xterm.css">
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; margin: 0; }
@@ -29,14 +30,12 @@ h1 small { color: #7d8590; font-weight: normal; font-size: 13px; }
 .meta { color: #7d8590; font-size: 13px; margin-left: auto; }
 .sub { color: #7d8590; font-size: 13px; margin-top: 4px; }
 .empty { color: #7d8590; text-align: center; padding: 40px 0; }
-#preview { position: fixed; inset: 0; background: #0e1116; padding: 16px; display: none; flex-direction: column; max-width: 720px; margin: 0 auto; }
-#preview.open { display: flex; }
-#preview header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-#preview pre {
-  flex: 1; overflow: auto; background: #161b22; border: 1px solid #30363d;
-  border-radius: 10px; padding: 12px;
-  font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
-  white-space: pre-wrap; word-break: break-all;
+#panel { position: fixed; inset: 0; background: #0e1116; padding: 12px; display: none; flex-direction: column; }
+#panel.open { display: flex; }
+#panel header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+#term {
+  flex: 1; min-height: 0; background: #0e1116; border: 1px solid #30363d;
+  border-radius: 10px; padding: 8px; overflow: auto;
 }
 button {
   background: #21262d; color: #e6edf3; border: 1px solid #30363d;
@@ -48,19 +47,22 @@ button {
 <h1>krill 🦐 <small id="count"></small></h1>
 <div class="cards" id="cards"><div class="empty">…</div></div>
 
-<div id="preview">
+<div id="panel">
   <header>
     <button id="back">←</button>
     <span class="name" id="pv-title"></span>
     <span class="meta" id="pv-meta"></span>
   </header>
-  <pre id="pv-text"></pre>
+  <div id="term"></div>
 </div>
 
+<script src="/assets/xterm.js"></script>
 <script>
 const token = new URLSearchParams(location.search).get('token');
 const qs = token ? `?token=${encodeURIComponent(token)}` : '';
-let current = null;
+// The UMD build exposes either the class or a module object.
+const XTerm = window.Terminal.Terminal || window.Terminal;
+let current = null, term = null, ws = null;
 
 function render(list) {
   const cards = document.getElementById('cards');
@@ -78,7 +80,7 @@ function render(list) {
     el.querySelector('.name').textContent = s.name;
     el.querySelector('.meta').textContent = `${s.age} · ${s.diff}`;
     el.querySelector('.sub').textContent = `${s.repo} · ${s.agent} · ${s.state}`;
-    el.onclick = () => openPreview(s);
+    el.onclick = () => openTerm(s);
     cards.appendChild(el);
   }
 }
@@ -88,30 +90,43 @@ async function refresh() {
     const r = await fetch('/api/sessions' + qs);
     if (r.ok) render(await r.json());
   } catch (e) { /* transient network error: keep the last view */ }
-  if (current) refreshPreview();
 }
 
-function openPreview(s) {
+function openTerm(s) {
   current = s;
   document.getElementById('pv-title').textContent = s.name;
   document.getElementById('pv-meta').textContent = `${s.repo} · ${s.agent}`;
-  document.getElementById('preview').classList.add('open');
-  refreshPreview();
+  document.getElementById('panel').classList.add('open');
+
+  // Fixed 80×24 (design §13): tmux renders for its smallest client, so
+  // the web view matches the detached default instead of fighting it.
+  term = new XTerm({
+    cols: 80, rows: 24, fontSize: 13, scrollback: 2000, convertEol: false,
+    theme: { background: '#0e1116' },
+  });
+  term.open(document.getElementById('term'));
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws/${encodeURIComponent(s.repo)}/${encodeURIComponent(s.name)}${qs}`;
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = (e) => {
+    if (!term) return;
+    term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data));
+  };
+  ws.onclose = () => { if (term) term.write('\r\n(connection closed)\r\n'); };
+  term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); });
+  term.focus();
 }
 
-async function refreshPreview() {
-  if (!current) return;
-  const url = `/api/preview/${encodeURIComponent(current.repo)}/${encodeURIComponent(current.name)}` + qs;
-  try {
-    const r = await fetch(url);
-    document.getElementById('pv-text').textContent = r.ok ? await r.text() : `(${r.status})`;
-  } catch (e) { /* keep last */ }
-}
-
-document.getElementById('back').onclick = () => {
+function closeTerm() {
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (term) { term.dispose(); term = null; }
   current = null;
-  document.getElementById('preview').classList.remove('open');
-};
+  document.getElementById('panel').classList.remove('open');
+}
+
+document.getElementById('back').onclick = closeTerm;
 
 refresh();
 setInterval(refresh, 2000);
