@@ -1,0 +1,11 @@
+# M0 is dependency-free on purpose (std only).
+# Planned deps per milestone: M1 ratatui+crossterm, M2 tokio+axum, (anytime) clap/serde/toml.
+
+[package]
+name = "krill-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library for krill: session, worktree, tmux and config management"
+
+[dependencies]
