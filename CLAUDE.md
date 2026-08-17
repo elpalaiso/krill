@@ -10,7 +10,10 @@ M0 완료: `new / ls / attach / diff / rm` + `--from` 릴레이 핸드오프. �
 이후 추가: 코어 유닛 테스트 + 실제 git 통합 테스트(`cargo test`), CLI 메시지
 ko/en i18n(`messages!` 카탈로그, 로케일 자동 감지), M1a TUI(읽기 전용 대시보드 —
 목록·라이브 미리보기·attach·도움말, ratatui는 바이너리 크레이트에만. 인자 없이
-`krill` 실행 시 TTY면 TUI, 아니면 ls). M1b(n/d/x 액션)가 다음 작업.
+`krill` 실행 시 TTY면 TUI, 아니면 ls) + M1b 액션(n 새 세션 3단계 프롬프트,
+d/D diff — TUI 일시중단 후 페이저(LESS=R로 짧은 diff도 유지), x 정리 모달 —
+dirty 경고·y/f/N). commands.rs의 create_session/remove_session은 무출력 코어라
+CLI와 TUI가 공유한다. 남은 M1c: 필터(/), 색 미리보기.
 
 다음 마일스톤 순서: M1 TUI(ratatui) → M2 `krill serve`(웹 UI + Tailscale 원격) →
 M3 Claude Code 훅 연동 + ntfy 푸시 + merge/pr → M4 릴리스 CI/brew → M5 듀엣(턴제
