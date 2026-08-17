@@ -88,6 +88,12 @@ pub fn capture_pane(name: &str) -> Result<String> {
     ok(&["capture-pane", "-p", "-t", &pane_target(name)])
 }
 
+/// Like `capture_pane` but keeps SGR color codes (`-e`) — the TUI
+/// parses them into styled text (M1c).
+pub fn capture_pane_ansi(name: &str) -> Result<String> {
+    ok(&["capture-pane", "-e", "-p", "-t", &pane_target(name)])
+}
+
 /// Attach as a blocking child process, returning when the client
 /// detaches — for the TUI, which must resume afterwards (`attach_exec`
 /// replaces the process and never returns).
