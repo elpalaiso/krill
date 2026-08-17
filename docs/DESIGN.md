@@ -256,9 +256,10 @@ serve/역프록시에 위임(§7).
 M2b(완료): 상호작용 — WebSocket + xterm.js 터미널(읽기+입력, 80×24 고정 — §13),
 `--bind tailscale` 키워드(`tailscale ip -4` 자동 감지). 스트림 구조: 접속 시
 현재 화면 스냅샷을 먼저 보내 mid-stream 깨짐을 막고, 이후는 pipe-pane 로그의
-새 바이트만 따라간다(UTF-8 경계가 깨질 수 있어 Binary 프레임). M2c: 폴리시 —
-퀵 리플라이 버튼(y/Enter 등, M3 NeedsYou의 전신), diff 뷰, `--expose`
-(funnel/cloudflared 감지 연동).
+새 바이트만 따라간다(UTF-8 경계가 깨질 수 있어 Binary 프레임). M2c(완료): 퀵 리플라이 버튼(y⏎/n⏎/⏎/Esc/^C — 키보드와 같은 WS로 전송,
+M3 NeedsYou의 전신) + diff 뷰(`GET /api/diff/{repo}/{name}`, worktree vs
+base, 512KB 캡, 프리픽스 색상). `--expose`(funnel/cloudflared 연동)는
+실환경 없이 검증 불가라 M3~M4 시점으로 연기 — M2는 이것을 제외하고 완료.
 
 블로킹 작업(tmux/git 서브프로세스)은 전부 `spawn_blocking`으로 실행자 밖에서.
 웹 터미널 리사이즈 문제(§13)는 M2b에서 "웹 뷰 80×24 고정"으로 단순화한다.

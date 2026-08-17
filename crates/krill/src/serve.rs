@@ -3,6 +3,8 @@
 //! vendored assets, `--bind tailscale`. Web view is fixed at 80×24 and
 //! input is meant to be short (§13 — tmux resizes to the smallest
 //! client, so the web stays a viewer first).
+//! M2c: quick-reply buttons (send canned keys over the same WS) and a
+//! diff view (GET /api/diff, worktree vs base, size-capped).
 //! Design doc §8.2. The page is a single embedded HTML file (vanilla JS,
 //! no CDN — a tailnet can be offline); state is rebuilt per request from
 //! tmux + meta files, so the server holds nothing and can die freely.
@@ -91,6 +93,7 @@ pub fn run(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/assets/xterm.css", get(asset_css))
         .route("/api/sessions", get(api_sessions))
         .route("/api/preview/{repo}/{name}", get(api_preview))
+        .route("/api/diff/{repo}/{name}", get(api_diff))
         .route("/ws/{repo}/{name}", get(ws_upgrade))
         .with_state(Arc::new(Srv { token }));
 
@@ -144,6 +147,45 @@ fn read_from(path: &std::path::Path, offset: u64) -> Vec<u8> {
     let mut buf = Vec::new();
     let _ = f.take(256 * 1024).read_to_end(&mut buf);
     buf
+}
+
+/// Cap huge diffs so one request can't ship a repo-sized body.
+const DIFF_CAP: usize = 512 * 1024;
+
+fn cap_diff(mut s: String) -> String {
+    if s.len() > DIFF_CAP {
+        let mut cut = DIFF_CAP;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push_str("\n… (truncated)\n");
+    }
+    s
+}
+
+async fn api_diff(
+    State(srv): State<Arc<Srv>>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> std::result::Result<String, StatusCode> {
+    if !authed(&srv, &q, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    tokio::task::spawn_blocking(move || {
+        let meta = session::find(&name, Some(&repo)).map_err(|_| StatusCode::NOT_FOUND)?;
+        if !meta.worktree.exists() {
+            return Err(StatusCode::GONE);
+        }
+        // Working tree vs base — uncommitted changes included, same as
+        // `krill diff` (agents frequently leave work uncommitted).
+        git::run(&meta.worktree, &["diff", &meta.base])
+            .map(cap_diff)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
 async fn ws_upgrade(
@@ -318,6 +360,15 @@ mod tests {
         assert!(!INDEX_HTML.contains("https://"));
         assert!(XTERM_JS.len() > 100_000); // the real library, not a stub
         assert!(XTERM_CSS.contains("xterm"));
+    }
+
+    #[test]
+    fn cap_diff_truncates_on_a_char_boundary() {
+        assert_eq!(cap_diff("small".into()), "small");
+        let big = "한".repeat(DIFF_CAP); // 3 bytes each — exceeds the cap mid-char
+        let capped = cap_diff(big);
+        assert!(capped.len() <= DIFF_CAP + 20);
+        assert!(capped.ends_with("… (truncated)\n"));
     }
 
     #[test]
