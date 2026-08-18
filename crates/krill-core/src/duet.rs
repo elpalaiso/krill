@@ -87,6 +87,10 @@ pub struct DuetState {
     /// The task goal, echoed into review instructions.
     pub goal: String,
     pub awaiting: Awaiting,
+    /// The worker was re-nudged once this turn after going idle
+    /// (aborted provider turn — design §12.1 decision 7). A second
+    /// idle escalates to Stalled instead of nudging forever.
+    pub nudged: bool,
 }
 
 impl DuetState {
@@ -97,6 +101,7 @@ impl DuetState {
             gate: gate.to_string(),
             goal: goal.to_string(),
             awaiting: Awaiting::Worker,
+            nudged: false,
         }
     }
 
@@ -107,6 +112,7 @@ impl DuetState {
         m.insert("gate".into(), self.gate.clone());
         m.insert("goal".into(), self.goal.clone());
         m.insert("awaiting".into(), self.awaiting.as_str().into());
+        m.insert("nudged".into(), self.nudged.to_string());
         m
     }
 
@@ -121,6 +127,8 @@ impl DuetState {
             goal: m.get("goal").cloned().unwrap_or_default(),
             awaiting: Awaiting::parse(&req("awaiting")?)
                 .with_context(|| msg::meta_field_missing("awaiting"))?,
+            // Absent in pre-M5d state files — an old walk resumes clean.
+            nudged: m.get("nudged").map(|v| v == "true").unwrap_or(false),
         })
     }
 
@@ -171,6 +179,64 @@ pub fn parse_verdict(review: Option<&str>) -> Verdict {
     }
 }
 
+/// What an agent's Notification hook payload means (design §12.1
+/// decision 7). Only Idle may ever be answered with typed input —
+/// send-keys into a permission dialog presses arbitrary buttons, so
+/// Permission and Unknown must never be nudged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationKind {
+    /// The agent is sitting at an empty prompt waiting for input.
+    Idle,
+    /// The agent is asking the human to approve something.
+    Permission,
+    /// Empty or unrecognized payload (other agents, old presets).
+    Unknown,
+}
+
+/// Classify a Notification hook payload by its message text. Pure
+/// substring matching on the raw JSON — core stays std-only, and the
+/// shapes come from the `claude-code` hook preset; agents without a
+/// payload land on Unknown and are left alone.
+pub fn classify_notification(payload: &str) -> NotificationKind {
+    let p = payload.to_ascii_lowercase();
+    // Permission wins over idle if both somehow appear — never type.
+    if p.contains("permission") || p.contains("approval") {
+        NotificationKind::Permission
+    } else if p.contains("waiting for your input") || p.contains("waiting for input") {
+        NotificationKind::Idle
+    } else {
+        NotificationKind::Unknown
+    }
+}
+
+/// Triage material for a stall notification: the first finding in a
+/// REVIEW.md body and how many findings there are, so the human can
+/// judge "valid → resume" from the push alone (§12.1 decision 7). The
+/// verdict line is skipped; findings are top-level `- ` bullets, with
+/// the first non-empty body line as fallback. `max_chars` bounds the
+/// excerpt (char-safe, `…`-terminated).
+pub fn review_excerpt(review: &str, max_chars: usize) -> Option<(String, usize)> {
+    let body: Vec<&str> = review.lines().skip(1).collect();
+    let bullets: Vec<&str> = body
+        .iter()
+        .map(|l| l.trim_start())
+        .filter(|l| l.starts_with("- "))
+        .map(|l| l["- ".len()..].trim())
+        .collect();
+    let (first, count) = match bullets.split_first() {
+        Some((first, rest)) => (*first, rest.len() + 1),
+        None => (*body.iter().find(|l| !l.trim().is_empty())?, 1),
+    };
+    let first = first.trim();
+    let excerpt = if first.chars().count() > max_chars {
+        let cut: String = first.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        first.to_string()
+    };
+    Some((excerpt, count))
+}
+
 /// A turn-end (or gate-end) event the referee reacts to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -180,6 +246,10 @@ pub enum Event {
     /// A human resumes a stalled duet (`krill resume`), optionally with
     /// a new round cap. Only valid while Stalled — out of turn otherwise.
     Resume { new_max: Option<u32> },
+    /// The worker went idle mid-task (idle Notification while the duet
+    /// awaits the worker — typically an aborted provider turn, design
+    /// §12.1 decision 7). Out of turn unless awaiting=worker.
+    WorkerIdle,
 }
 
 /// What the binary must do after a step.
@@ -203,6 +273,9 @@ pub enum Action {
     Complete,
     /// Round cap hit: mark needs-you and call the human.
     Stall,
+    /// The worker went idle mid-task: send it a continue instruction
+    /// (once per turn — a second idle produces Stall instead).
+    NudgeWorker,
 }
 
 /// The referee. Pure: (state, event) → (state', action). `None` means
@@ -212,7 +285,19 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
     let action = match (state.awaiting, event) {
         (Awaiting::Worker, Event::WorkerDone) => {
             next.awaiting = Awaiting::Reviewer;
+            next.nudged = false;
             Action::PingReviewer
+        }
+        (Awaiting::Worker, Event::WorkerIdle) => {
+            if state.nudged {
+                // Nudged once already and it went idle again — a human
+                // is needed; `krill resume` is the recovery path.
+                next.awaiting = Awaiting::Stalled;
+                Action::Stall
+            } else {
+                next.nudged = true;
+                Action::NudgeWorker
+            }
         }
         (Awaiting::Reviewer, Event::ReviewerDone(v)) => match v {
             Verdict::Lgtm if state.gate.is_empty() => {
@@ -226,6 +311,7 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
             Verdict::Issues if state.round < state.max_rounds => {
                 next.round += 1;
                 next.awaiting = Awaiting::Worker;
+                next.nudged = false;
                 Action::PingWorkerReview
             }
             Verdict::Missing if state.round < state.max_rounds => {
@@ -251,12 +337,14 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
                 next.max_rounds = mx;
             }
             next.awaiting = Awaiting::Worker;
+            next.nudged = false;
             Action::PingWorkerResume
         }
         (Awaiting::Gate, Event::GateFinished { pass: false }) => {
             if state.round < state.max_rounds {
                 next.round += 1;
                 next.awaiting = Awaiting::Worker;
+                next.nudged = false;
                 Action::PingWorkerGate
             } else {
                 next.awaiting = Awaiting::Stalled;
@@ -279,7 +367,78 @@ mod tests {
             gate: gate.into(),
             goal: "the goal".into(),
             awaiting,
+            nudged: false,
         }
+    }
+
+    #[test]
+    fn idle_worker_is_nudged_once_then_stalls() {
+        let (next, a) = step(&st(0, 2, "", Awaiting::Worker), Event::WorkerIdle);
+        assert_eq!(a, Some(Action::NudgeWorker));
+        assert!(next.nudged);
+        assert_eq!(next.awaiting, Awaiting::Worker);
+        // A second idle after the nudge calls the human.
+        let (next2, a2) = step(&next, Event::WorkerIdle);
+        assert_eq!(a2, Some(Action::Stall));
+        assert_eq!(next2.awaiting, Awaiting::Stalled);
+    }
+
+    #[test]
+    fn idle_is_out_of_turn_unless_awaiting_worker() {
+        for aw in [Awaiting::Reviewer, Awaiting::Gate, Awaiting::Done, Awaiting::Stalled] {
+            let s = st(0, 2, "", aw);
+            assert_eq!(step(&s, Event::WorkerIdle), (s.clone(), None));
+        }
+    }
+
+    #[test]
+    fn nudged_resets_when_a_fresh_worker_turn_starts() {
+        let mut s = st(0, 2, "", Awaiting::Worker);
+        s.nudged = true;
+        // Completing the turn clears it…
+        let (next, _) = step(&s, Event::WorkerDone);
+        assert!(!next.nudged);
+        // …as do a rework round and a human resume.
+        let mut rev = st(0, 2, "", Awaiting::Reviewer);
+        rev.nudged = true;
+        let (next, _) = step(&rev, Event::ReviewerDone(Verdict::Issues));
+        assert!(!next.nudged);
+        let mut stalled = st(2, 2, "", Awaiting::Stalled);
+        stalled.nudged = true;
+        let (next, _) = step(&stalled, Event::Resume { new_max: None });
+        assert!(!next.nudged);
+    }
+
+    #[test]
+    fn notification_classification_never_types_into_dialogs() {
+        use NotificationKind::*;
+        assert_eq!(classify_notification(r#"{"message":"Claude is waiting for your input"}"#), Idle);
+        assert_eq!(
+            classify_notification(r#"{"message":"Claude needs your permission to use Bash"}"#),
+            Permission
+        );
+        // Both markers present → Permission wins (never type).
+        assert_eq!(
+            classify_notification("waiting for your input… needs permission"),
+            Permission
+        );
+        assert_eq!(classify_notification(""), Unknown);
+        assert_eq!(classify_notification("something else entirely"), Unknown);
+    }
+
+    #[test]
+    fn review_excerpt_gives_first_finding_and_count() {
+        let review = "ISSUES\n\n- first finding here\n  detail line\n- second finding\n";
+        assert_eq!(review_excerpt(review, 100), Some(("first finding here".into(), 2)));
+        // No bullets — first non-empty body line, count 1.
+        assert_eq!(review_excerpt("ISSUES\nprose only\n", 100), Some(("prose only".into(), 1)));
+        // Verdict-only file has no material.
+        assert_eq!(review_excerpt("LGTM\n", 100), None);
+        // Long findings are cut on a char boundary with an ellipsis.
+        let long = format!("ISSUES\n- {}\n", "가".repeat(50));
+        let (cut, _) = review_excerpt(&long, 10).unwrap();
+        assert_eq!(cut.chars().count(), 10);
+        assert!(cut.ends_with('…'));
     }
 
     #[test]

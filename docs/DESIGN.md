@@ -476,6 +476,36 @@ duet를 통과하면 심판이 체크박스를 갱신한 뒤 그 갱신까지 �
 REVIEW.md 프로토콜, gate, 라운드 캡). M5c: `krill plan`/`krill approve` +
 plan.md 순회(작업마다 듀엣, 완료 시 커밋 + 체크박스 갱신).
 
+**결정 7 — 베이비시팅은 심판의 일이다 (M5d, anago M0 dogfood 회고).**
+41개 작업 순회를 실전 운용해 보니, 사람(또는 외부 감시 에이전트)이 하던
+개입은 네 종류뿐이었고 전부 심판이 흡수할 수 있다. 원칙은 유지한다 —
+엔진은 훅(데몬 0), 판단이 필요한 곳만 사람.
+
+- **worker 유휴 재지시.** 에이전트 턴이 프로바이더 API 오류로 중단되면
+  Stop(done) 없이 Notification(needs-you)만 온다 — 듀엣은 awaiting=worker
+  로 조용히 멈춘다. 훅이 Notification **payload를 분류**해(stdin JSON,
+  M3a에서 버리던 것) "유휴 대기"일 때만, awaiting=worker인 duet worker에게
+  1회 이어가기 재지시를 보낸다(`nudged` 플래그 — 라운드/작업 전환 시
+  리셋). 재지시 후에도 다시 유휴가 오면 Stalled로 승격해 사람을 부른다
+  (`krill resume`이 복구 경로). **권한 프롬프트로 분류되면 절대 타이핑하지
+  않는다** — 대화상자에 send-keys는 임의 버튼을 누르는 것과 같다(실측).
+  분류 불명도 타이핑하지 않는다. 분류는 순수 함수, 프리셋(claude-code)의
+  페이로드 형태에만 의존하고 다른 에이전트는 페이로드가 없어 자연히 제외.
+- **스톨 알림에 판단 재료를 싣는다.** 순회 중 사람 개입은 사실상
+  "REVIEW.md 읽고 타당하면 resume"의 반복이었다. 스톨 ntfy에 리뷰 첫
+  지적(요약)과 건수를 포함해, 폰에서 판단하고 터미널에서 `krill resume`
+  한 줄로 끝나게 한다. **자동 resume은 만들지 않는다** — 라운드 캡은
+  담합·비용 방지 장치라 모델 판단으로 우회하면 "심판은 코드" 원칙이
+  무너진다. 캡 조정(`--max-rounds`, `resume --rounds`)으로 충분하다.
+- **진행 가시성.** ls/TUI의 plan 표기는 phase 대신 진행률
+  (`plan:12/41`, running일 때)을 보여준다. 작업별 푸시는 이미 있다
+  (ntfy_plan_progress) — README에 `[notify]` 설정을 문서화한다.
+- **순회의 끝은 PR이다.** `krill pr`은 비대화형에서 gh가 --title/--body를
+  요구해 실패했다(실측). plan 세션이면 plan.md(제목 = 첫 헤딩, 본문 =
+  완료 체크리스트)와 HUMAN-VERIFY.md 유무("사람 확인 필요" 절 — 에이전트
+  검증 불가 항목의 규약 파일명)로 본문을 생성해 넘기고, 일반 세션은
+  `--fill`로 커밋 메시지를 쓴다.
+
 ## 13. 리스크와 열린 질문
 
 **tmux 의존.** macOS/Linux에서는 사실상 표준이지만 Windows 네이티브가 없다. v1은 WSL2 안내로 대응하고, 수요가 생기면 `SessionBackend` trait에 PtyBackend를 추가한다.

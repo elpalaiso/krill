@@ -7,6 +7,7 @@ use krill_core::duet::{self, Action, Awaiting, DuetRef, DuetRole, DuetState, Eve
 use krill_core::plan::{self, PlanPhase, PlanState};
 use krill_core::session::{self, FlowNext, FlowRef, SessionMeta, Status};
 use krill_core::tmux;
+use std::io::IsTerminal as _;
 use std::io::Write as _;
 use std::process::Command;
 
@@ -542,11 +543,9 @@ pub fn ls() -> Result<()> {
                 .as_ref()
                 .map(|f| format!("{}:{}", f.flow, f.stage))
                 .or_else(|| {
-                    // A plan leader shows its phase; its reviewer (and
-                    // plain duets) show the duet role.
-                    PlanState::load(&m.id())
-                        .ok()
-                        .map(|p| format!("plan:{}", p.phase.as_str()))
+                    // A plan leader shows its progress (or phase); its
+                    // reviewer (and plain duets) show the duet role.
+                    plan::flow_label(&m.id(), &m.worktree)
                 })
                 .or_else(|| m.duet.as_ref().map(|d| format!("duet:{}", d.role.as_str())))
                 .unwrap_or_else(|| "-".into()),
@@ -735,11 +734,30 @@ pub fn pr(name: &str, repo: Option<&str>) -> Result<()> {
     }
     git::run(&meta.worktree, &["push", "-u", "origin", &meta.branch])?;
     println!("{}", m::pr_pushed(&meta.branch));
-    let status = Command::new("gh")
-        .args(["pr", "create", "--head", &meta.branch])
-        .current_dir(&meta.worktree)
-        .status()
-        .context(m::gh_failed())?;
+    let mut cmd = Command::new("gh");
+    cmd.args(["pr", "create", "--head", &meta.branch]).current_dir(&meta.worktree);
+    // A plan walk writes its own PR (design §12.1 decision 7): title =
+    // plan.md's heading, body = the checklist (the work log) plus the
+    // human-verification pointer. Other sessions keep gh's interactive
+    // prompt on a TTY and fall back to --fill without one — gh refuses
+    // to run non-interactively with no title/body (BACKLOG #10).
+    let plan_pr = PlanState::load(&meta.id()).ok().and_then(|ps| {
+        let md = std::fs::read_to_string(meta.worktree.join("plan.md")).ok()?;
+        let title = plan::pr_title(&md).unwrap_or_else(|| meta.name.clone());
+        let human_verify = meta.worktree.join("HUMAN-VERIFY.md").exists();
+        Some((title, plan::pr_body(&md, &ps.goal, &ps.gate, human_verify)))
+    });
+    match &plan_pr {
+        Some((title, body)) => {
+            cmd.args(["--title", title, "--body", body]);
+        }
+        None => {
+            if !std::io::stdin().is_terminal() {
+                cmd.arg("--fill");
+            }
+        }
+    }
+    let status = cmd.status().context(m::gh_failed())?;
     if !status.success() {
         bail!(m::gh_exit(&status.to_string()));
     }
@@ -825,8 +843,10 @@ pub fn hook(state: &str, id: &str) -> Result<()> {
     if id.is_empty() {
         return Ok(());
     }
-    let mut sink = String::new();
-    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut sink);
+    // The Notification payload (JSON on stdin) is kept: needs-you
+    // handling classifies it (design §12.1 decision 7).
+    let mut payload = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
     session::write_hook_state(id, hs)?;
 
     let config = Config::load().ok();
@@ -835,22 +855,91 @@ pub fn hook(state: &str, id: &str) -> Result<()> {
     // advance a chain, flip a plan to Ready, or hand the duet turn over.
     // A running plan *is* a duet, so the plan layer only owns the
     // planning phase and falls through otherwise. The outcome replaces
-    // the generic ntfy body.
+    // the generic ntfy body. NeedsYou on an idle duet worker is an
+    // aborted turn — the referee nudges it back to work (§12.1
+    // decision 7); a successful nudge is a quiet self-heal, no push.
+    let mut quiet = false;
     let note = match (&config, hs) {
         (Some(cfg), krill_core::session::HookState::Done) => advance_flow(cfg, id)
             .or_else(|| advance_plan(id))
             .or_else(|| advance_duet(id)),
+        (_, krill_core::session::HookState::NeedsYou) => match nudge_idle_worker(id, &payload) {
+            IdleNudge::Nudged => {
+                quiet = true;
+                None
+            }
+            IdleNudge::Stalled(msg) => Some(msg),
+            IdleNudge::NotHandled => None,
+        },
         _ => None,
     };
 
     if let Some(topic) = config.and_then(|c| c.ntfy_topic) {
-        let body = note.unwrap_or_else(|| match hs {
-            krill_core::session::HookState::NeedsYou => m::ntfy_needs_you(id),
-            krill_core::session::HookState::Done => m::ntfy_done(id),
-        });
-        ntfy_push(&topic, &body);
+        if !quiet {
+            let body = note.unwrap_or_else(|| match hs {
+                krill_core::session::HookState::NeedsYou => m::ntfy_needs_you(id),
+                krill_core::session::HookState::Done => m::ntfy_done(id),
+            });
+            ntfy_push(&topic, &body);
+        }
     }
     Ok(())
+}
+
+/// Outcome of the idle-worker check on a needs-you hook.
+enum IdleNudge {
+    /// The worker was told to continue — a quiet self-heal.
+    Nudged,
+    /// A human is needed; the message is the ntfy body.
+    Stalled(String),
+    /// Not an idle duet worker (or not an idle notification) — the
+    /// generic needs-you path applies.
+    NotHandled,
+}
+
+/// Design §12.1 decision 7: an idle Notification while the duet awaits
+/// the worker means the turn was cut short (e.g. a provider API error)
+/// — without this, the duet waits forever with no signal. Nudge once
+/// per turn; a second idle escalates to Stalled so `krill resume` can
+/// recover. Permission prompts and unknown payloads are NEVER answered
+/// with typed input — send-keys into a dialog presses arbitrary buttons.
+fn nudge_idle_worker(id: &str, payload: &str) -> IdleNudge {
+    if duet::classify_notification(payload) != duet::NotificationKind::Idle {
+        return IdleNudge::NotHandled;
+    }
+    let Ok(meta) = session::find_by_id(id) else {
+        return IdleNudge::NotHandled;
+    };
+    if !matches!(&meta.duet, Some(d) if d.role == DuetRole::Worker) {
+        return IdleNudge::NotHandled;
+    }
+    let Ok(state) = DuetState::load(id) else {
+        return IdleNudge::NotHandled;
+    };
+    let (next, action) = duet::step(&state, Event::WorkerIdle);
+    match action {
+        Some(Action::NudgeWorker) => {
+            if next.save(id).is_err() {
+                return IdleNudge::NotHandled;
+            }
+            if deliver_instruction(&meta, &m::duet_nudge_instruction(), false) {
+                IdleNudge::Nudged
+            } else {
+                // Undeliverable (dead tmux): burn the retry through the
+                // same machine so resume finds a proper Stalled state.
+                let (next2, a2) = duet::step(&next, Event::WorkerIdle);
+                if a2 == Some(Action::Stall) {
+                    let _ = next2.save(id);
+                }
+                IdleNudge::Stalled(m::ntfy_duet_worker_dead(&meta.name))
+            }
+        }
+        Some(Action::Stall) => {
+            let _ = next.save(id);
+            IdleNudge::Stalled(m::ntfy_duet_idle_stalled(&meta.name))
+        }
+        _ => IdleNudge::NotHandled,
+    }
 }
 
 /// Best-effort push, delegated to curl (principle 1), fire-and-forget —
@@ -1082,11 +1171,26 @@ fn advance_duet(id: &str) -> Option<String> {
         }
         Action::Stall => {
             let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
-            Some(m::ntfy_duet_stalled(&worker.name, next.max_rounds))
+            // Triage material in the push (§12.1 decision 7): the first
+            // finding and count let the human judge "valid → resume"
+            // from the phone. REVIEW.md still exists here — only
+            // PingReviewer/RunGate/Complete consume it.
+            let mut body = m::ntfy_duet_stalled(&worker.name, next.max_rounds);
+            if let Ok(review) = std::fs::read_to_string(&review_path) {
+                if let Some((first, n)) = duet::review_excerpt(&review, 120) {
+                    body.push_str(&if n > 1 {
+                        m::stall_review_note_more(&first, n - 1)
+                    } else {
+                        m::stall_review_note(&first)
+                    });
+                }
+            }
+            Some(body)
         }
-        // Only the gate child (PingWorkerGate) and the resume command
-        // (PingWorkerResume) can produce these actions.
-        Action::PingWorkerGate | Action::PingWorkerResume => None,
+        // Only the gate child (PingWorkerGate), the resume command
+        // (PingWorkerResume) and the needs-you hook (NudgeWorker) can
+        // produce these actions.
+        Action::PingWorkerGate | Action::PingWorkerResume | Action::NudgeWorker => None,
     }
 }
 

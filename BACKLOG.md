@@ -103,3 +103,77 @@ uncommitted)"를 요구한다. 단발 duet에는 맞지만 plan 순회에서는 
 이어질 수 있다(라운드 캡 스톨의 원인(遠因) 후보). 제안: plan 순회의
 리뷰 지시에는 범위를 "uncommitted changes"(= 현재 태스크의 작업분)로
 좁히고, 전체 브랜치 리뷰는 순회 종료 후 1회(F단계 성격)로 분리.
+
+### 8. worker 턴이 API 오류로 불완전 종료되면 듀엣이 조용히 대기 — ✅ 수정됨
+
+**수정 (2026-08-19, M5d)**: 훅이 Notification payload를 분류해(stdin
+JSON — M3a에서 버리던 것) "유휴 대기"일 때만 duet worker에게 1회
+이어가기 재지시(`nudged` 플래그), 재발 시 Stalled 승격 + ntfy. 권한
+프롬프트·분류 불명에는 절대 타이핑하지 않음. DESIGN §12.1 결정 7.
+
+worker의 에이전트 턴이 프로바이더 API 오류("Server error mid-response")로
+중단되면 Stop(done)이 아니라 Notification(needs-you)만 발화한다. 듀엣은
+`awaiting=worker`로 남고 재지시가 없어, ◆ 표시 외엔 신호 없이 멈춘다
+(anago M0 39번째 태스크에서 실제 발생 — 사람이 이어가기 지시로 복구).
+제안: `awaiting=worker` 중 worker가 needs-you로 전이하면 심판이 1회
+재지시(resume 문구)하고, 그래도 진행이 없으면 스톨로 승격 + ntfy.
+
+### 9. plan 순회에서 worker 세션 컨텍스트가 소진됨
+
+듀엣 설계는 "양쪽 모델이 프로젝트 전체 맥락을 자기 세션에 누적"을
+장점으로 꼽지만(§12), 40개 태스크 순회의 후반(38번째 태스크)에서 worker
+Claude 세션이 컨텍스트 100%에 도달했다. 이후 태스크의 작업 품질 저하·
+자동 압축 지연의 원인이 될 수 있다. 제안: plan 순회에서 태스크 N개마다
+(또는 컨텍스트 임계에서) worker에게 `/compact`를 지시하거나, HANDOFF
+요약 후 세션을 로테이션하는 옵션. 최소한 문서에 장기 순회의 컨텍스트
+한계를 명시.
+
+### 10. `krill pr`이 비대화형에서 실패 — ✅ 수정됨
+
+**수정 (2026-08-19, M5d)**: plan 세션이면 plan.md 첫 헤딩을 제목으로,
+체크리스트+게이트 계약+HUMAN-VERIFY.md 포인터를 본문으로 생성해 gh에
+넘긴다(`plan::pr_title`/`pr_body` 순수 함수). 일반 세션은 TTY에선 기존
+gh 프롬프트 유지, 비대화형이면 `--fill`.
+
+`gh pr create`를 인자 없이 위임해서, TTY가 아니면 "must provide --title
+and --body"로 실패한다(브랜치 푸시는 성공). anago M0 PR에서 실제 발생.
+제안: 비대화형이면 `--fill`을 붙이거나, plan 세션이면 plan.md(완료 태스크
+목록)와 HUMAN-VERIFY.md 존재 여부로 제목·본문을 생성해 넘긴다.
+
+## 기능 제안 — 순회 베이비시팅의 내장화 (2026-08-18, anago M0 회고)
+— **✅ M5d로 구현됨 (2026-08-19)**: F1(스톨 ntfy에 리뷰 첫 지적+건수),
+F2(ls/TUI `plan:12/41` + README `[notify]` 문서화), F3(#8 worker 유휴
+재지시), F4(#10 plan PR 본문 자동 생성). 남은 것: 웹 UI의 REVIEW.md
+열람·resume 버튼(F1의 후반부).
+
+anago M0 순회(41 태스크, ~5시간) 동안 외부 에이전트(Claude Code 세션)가
+수동으로 맡았던 역할들을 krill이 흡수할 수 있는지 검토한 결과. 원칙:
+데몬 0(§6.1 훅 엔진) 유지 — 아래 제안은 모두 훅/기존 명령의 확장이다.
+
+### F1. 스톨 triage UX — 알림에 판단 재료를 실어라
+
+순회 중 스톨 5회의 human 개입은 전부 "REVIEW.md 읽고 → 타당하면
+resume"의 반복이었다. needs-you ntfy에 REVIEW.md 첫 지적 요약(첫 줄
++ N건)을 포함하고, 웹 UI 세션 카드에서 REVIEW.md 열람 + resume
+원클릭 버튼을 제공하면 개입 비용이 크게 준다. (자동 resume 정책은
+비추천 — 라운드 캡은 담합·비용 방지 장치라 모델 판단으로 우회하면
+§12의 "심판은 코드" 원칙이 무너진다. 캡을 config로 올리는 것으로 충분.)
+
+### F2. plan 진행 가시성
+
+`krill ls`/TUI/웹에 plan 세션의 진행률(12/41)·현재 태스크·라운드·
+awaiting을 표시. ntfy_plan_progress는 이미 있으니 [notify] 설정만 하면
+태스크별 푸시가 온다는 것을 README에 문서화.
+
+### F3. 심판 self-heal 마무리 (#8)
+
+리뷰어 사망 재스폰·Enter 재전송은 이미 들어갔다(#1·#3). 남은 구멍은
+worker 쪽: `awaiting=worker` 중 worker가 needs-you로 전이(API 오류
+중단)하면 심판이 1회 재지시, 무progress면 스톨 승격. 이것까지 되면
+외부 감시자의 "소생" 역할은 소멸한다.
+
+### F4. 순회 종료 리포트
+
+plan done 시 요약 생성: 완료/전체, 커밋 목록, 게이트 결과, 스톨 횟수,
+HUMAN-VERIFY.md 유무. `krill pr`(#10 수정 후)이 이걸 PR 본문으로 쓰면
+"순회 끝 → PR"이 한 명령이 된다.

@@ -103,6 +103,14 @@ krill plan big-refactor -m "설정 모듈을 모두 TOML로 이관" --gate "carg
 krill approve big-refactor
 ```
 
+순회 중에는 `krill ls`의 FLOW 컬럼이 진행률(`plan:12/41`)을 보여주고,
+config에 `[notify] ntfy_topic`을 설정해 두면 **작업 하나가 통과·커밋될
+때마다 폰으로 진행 푸시**가 옵니다. 리뷰 라운드 캡으로 순회가 멈추면
+(◆) 푸시에 리뷰어의 첫 지적이 함께 실리므로, 지적이 타당하다 싶으면
+`krill resume big-refactor`(필요하면 `--rounds N`으로 캡 조정) 한 줄로
+재개하면 됩니다. worker의 턴이 프로바이더 오류로 끊긴 경우에는 krill이
+1회 자동 재지시하고, 그래도 멈추면 같은 방식으로 사람을 부릅니다.
+
 ## 로드맵
 
 | 단계 | 내용 | 상태 |
