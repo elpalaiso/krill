@@ -27,17 +27,28 @@ KRILL_LANG=en krill ls              # 1회성 강제
 
 ## 설치
 
+아직 첫 릴리스 태그(v*) 전이라 **소스 빌드가 유일한 설치 방법**입니다.
+아래 Homebrew·릴리스 바이너리 안내는 첫 태그가 나온 뒤에 동작합니다.
+
+```sh
+# 소스에서 빌드 (현재 유일한 방법, 릴리스 바이너리 ~2MB)
+git clone https://github.com/elpalaiso/krill
+cd krill
+cargo build --release        # target/release/krill
+# 또는 PATH에 바로 설치:
+cargo install --path crates/krill
+```
+
+### 릴리스 후 (첫 v* 태그 이후 사용 가능)
+
+태그(v*)를 푸시하면 GitHub Actions가 4개 플랫폼(linux/mac × x86_64/arm64)
+바이너리를 릴리스에 첨부합니다. 그 뒤에는 아래 방법을 쓸 수 있습니다.
+
 ```sh
 # Homebrew (이 리포가 곧 tap)
 brew tap elpalaiso/krill https://github.com/elpalaiso/krill
 brew install --HEAD elpalaiso/krill/krill
-
-# 또는 소스에서 (릴리스 바이너리 ~2MB)
-cargo install --path crates/krill
 ```
-
-태그(v*)를 푸시하면 GitHub Actions가 4개 플랫폼(linux/mac × x86_64/arm64)
-바이너리를 릴리스에 첨부합니다.
 
 ## 빠른 시작
 
