@@ -101,6 +101,8 @@ hooks = "claude-code"     # NeedsYou/Done 상태 훅 자동 주입
 
 [agents.codex]
 cmd = "codex {prompt}"
+# hooks = "external"      # 자체 notify 브리지로 `krill hook`을 직접 쏘는 에이전트는
+                          # 이 값으로 훅 없음 경고를 끕니다 (주입은 "claude-code"만).
 
 [agents.gemini]
 cmd = "gemini {prompt}"
@@ -144,6 +146,9 @@ hooks = "claude-code"     # auto-inject NeedsYou/Done status hooks
 
 [agents.codex]
 cmd = "codex {prompt}"
+# hooks = "external"      # an agent that fires `krill hook` itself (e.g. via its
+                          # own notify bridge) can silence the no-hooks warning
+                          # with this; only "claude-code" triggers injection.
 
 [agents.gemini]
 cmd = "gemini {prompt}"

@@ -177,6 +177,9 @@ pub enum Event {
     WorkerDone,
     ReviewerDone(Verdict),
     GateFinished { pass: bool },
+    /// A human resumes a stalled duet (`krill resume`), optionally with
+    /// a new round cap. Only valid while Stalled — out of turn otherwise.
+    Resume { new_max: Option<u32> },
 }
 
 /// What the binary must do after a step.
@@ -190,6 +193,10 @@ pub enum Action {
     PingWorkerGate,
     /// The reviewer skipped REVIEW.md — ask again.
     ReinstructReviewer,
+    /// A human resumed a stalled duet: instruct the worker to pick the
+    /// task back up (REVIEW.md/GATE.md may or may not still exist —
+    /// the stall cause isn't recorded, so the instruction names both).
+    PingWorkerResume,
     /// LGTM with a gate configured: run it detached.
     RunGate,
     /// Duet finished successfully.
@@ -235,6 +242,16 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
         (Awaiting::Gate, Event::GateFinished { pass: true }) => {
             next.awaiting = Awaiting::Done;
             Action::Complete
+        }
+        (Awaiting::Stalled, Event::Resume { new_max }) => {
+            // The human's intervention grants a fresh set of rework
+            // rounds; the cap changes only when they say so.
+            next.round = 0;
+            if let Some(mx) = new_max {
+                next.max_rounds = mx;
+            }
+            next.awaiting = Awaiting::Worker;
+            Action::PingWorkerResume
         }
         (Awaiting::Gate, Event::GateFinished { pass: false }) => {
             if state.round < state.max_rounds {
@@ -348,6 +365,22 @@ mod tests {
         let (stalled, a) = step(&next, Event::ReviewerDone(Verdict::Missing));
         assert_eq!(a, Some(Action::Stall));
         assert_eq!(stalled.awaiting, Awaiting::Stalled);
+    }
+
+    #[test]
+    fn resume_reawakens_only_a_stalled_duet() {
+        // Stalled + Resume → worker's turn, rounds reset, cap kept.
+        let (next, a) = step(&st(2, 2, "", Awaiting::Stalled), Event::Resume { new_max: None });
+        assert_eq!(a, Some(Action::PingWorkerResume));
+        assert_eq!((next.round, next.max_rounds, next.awaiting), (0, 2, Awaiting::Worker));
+        // An explicit --rounds raises the cap.
+        let (next, _) = step(&st(2, 2, "", Awaiting::Stalled), Event::Resume { new_max: Some(5) });
+        assert_eq!(next.max_rounds, 5);
+        // Anywhere else, Resume is out of turn.
+        for aw in [Awaiting::Worker, Awaiting::Reviewer, Awaiting::Gate, Awaiting::Done] {
+            let s = st(1, 2, "", aw);
+            assert_eq!(step(&s, Event::Resume { new_max: None }), (s.clone(), None));
+        }
     }
 
     #[test]
