@@ -15,6 +15,10 @@ pub struct AgentCfg {
     pub cmd: String,
     /// Reserved for M3: hook preset name (e.g. "claude-code").
     pub hooks: Option<String>,
+    /// Context-compaction command typed into the agent between plan
+    /// tasks (design §12.1 decision 7, BACKLOG #9) — e.g. "/compact"
+    /// for Claude Code. Config data, not code: principle 2.
+    pub compact: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +51,9 @@ pub struct DuetCfg {
     pub reviewer: Option<String>,
     pub gate: Option<String>,
     pub max_rounds: Option<u32>,
+    /// Plan walks: send the worker its agent's `compact` command every
+    /// N completed tasks (0/absent = off). BACKLOG #9.
+    pub compact_every: Option<u32>,
 }
 
 /// One stage of a `[flows.*]` chain (design §12.1). Stages are numbered
@@ -98,6 +105,7 @@ default_agent = "claude"
 [agents.claude]
 cmd = "claude {prompt}"
 hooks = "claude-code"     # NeedsYou/Done 상태 훅 자동 주입
+# compact = "/compact"    # plan 순회에서 주기적으로 보낼 컨텍스트 압축 명령
 
 [agents.codex]
 cmd = "codex {prompt}"
@@ -130,6 +138,7 @@ cmd = ""                  # 빈 cmd = 그냥 셸 (테스트용)
 # reviewer = "codex"                 # 기본 리뷰어 (생략 시 default_agent)
 # gate = "cargo test"                # LGTM 뒤에 도는 객관 게이트 ([repos.*] gate가 우선)
 # max_rounds = 2                     # 재작업 왕복 캡
+# compact_every = 8                  # plan 순회에서 N개 작업마다 worker 컨텍스트 압축 (0 = 끔)
 "#;
 
 pub const DEFAULT_CONFIG_EN: &str = r#"# krill config
@@ -143,6 +152,7 @@ default_agent = "claude"
 [agents.claude]
 cmd = "claude {prompt}"
 hooks = "claude-code"     # auto-inject NeedsYou/Done status hooks
+# compact = "/compact"    # context-compaction command sent periodically on plan walks
 
 [agents.codex]
 cmd = "codex {prompt}"
@@ -176,6 +186,7 @@ cmd = ""                  # empty cmd = plain shell (for testing)
 # reviewer = "codex"                # default reviewer (omitted = default_agent)
 # gate = "cargo test"               # objective gate after LGTM ([repos.*] gate wins)
 # max_rounds = 2                    # rework round cap
+# compact_every = 8                 # compact the worker's context every N plan tasks (0 = off)
 "#;
 
 /// The default config template in the current language. Both variants
@@ -297,6 +308,7 @@ fn parse(raw: &str) -> Result<Config> {
                 match key {
                     "cmd" => entry.cmd = value,
                     "hooks" => entry.hooks = Some(value),
+                    "compact" if !value.is_empty() => entry.compact = Some(value),
                     _ => {}
                 }
             }
@@ -319,6 +331,11 @@ fn parse(raw: &str) -> Result<Config> {
                 "gate" if !value.is_empty() => config.duet.gate = Some(value),
                 "max_rounds" => {
                     config.duet.max_rounds = Some(
+                        value.parse().with_context(|| msg::cfg_value_parse_failed(lineno))?,
+                    )
+                }
+                "compact_every" => {
+                    config.duet.compact_every = Some(
                         value.parse().with_context(|| msg::cfg_value_parse_failed(lineno))?,
                     )
                 }
@@ -525,17 +542,23 @@ port = 7777
     fn parses_duet_section_and_repo_gate() {
         let c = parse(
             "[duet]\nreviewer = \"codex\"\ngate = \"cargo test\"\nmax_rounds = 3\n\
-             [repos.web]\npath = \"/w\"\ngate = \"npm test\"\n",
+             compact_every = 8\n\
+             [repos.web]\npath = \"/w\"\ngate = \"npm test\"\n\
+             [agents.claude]\ncmd = \"claude {prompt}\"\ncompact = \"/compact\"\n",
         )
         .unwrap();
         assert_eq!(c.duet.reviewer.as_deref(), Some("codex"));
         assert_eq!(c.duet.gate.as_deref(), Some("cargo test"));
         assert_eq!(c.duet.max_rounds, Some(3));
+        assert_eq!(c.duet.compact_every, Some(8));
+        assert_eq!(c.agents["claude"].compact.as_deref(), Some("/compact"));
         assert_eq!(c.repos["web"].gate.as_deref(), Some("npm test"));
 
         assert!(parse("[duet]\nmax_rounds = not-a-number\n").is_err());
         let d = parse("").unwrap().duet;
         assert!(d.reviewer.is_none() && d.gate.is_none() && d.max_rounds.is_none());
+        assert!(d.compact_every.is_none());
+        assert!(parse("[agents.a]\ncompact = \"\"\n").unwrap().agents["a"].compact.is_none());
         assert!(parse("[duet]\ngate = \"\"\n").unwrap().duet.gate.is_none());
     }
 

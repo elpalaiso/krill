@@ -18,10 +18,11 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use krill_core::error::{Context, Result};
 use krill_core::session::{self, Status};
+use krill_core::duet::{self, Awaiting, DuetRole, DuetState};
 use krill_core::{bail, git, tmux};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -48,6 +49,13 @@ struct SessionInfo {
     state: &'static str,
     age: String,
     diff: String,
+    /// The duet is stalled (round cap / exhausted nudges) — the card
+    /// offers one-click resume (design §12.1 decision 7, F1).
+    stalled: bool,
+    /// First REVIEW.md finding for triage ("" when none).
+    review: String,
+    /// Additional finding count beyond the first.
+    review_more: usize,
 }
 
 fn state_str(h: Status) -> &'static str {
@@ -96,6 +104,7 @@ pub fn run(bind: &str, port: u16, token: Option<String>) -> Result<()> {
         .route("/api/sessions", get(api_sessions))
         .route("/api/preview/{repo}/{name}", get(api_preview))
         .route("/api/diff/{repo}/{name}", get(api_diff))
+        .route("/api/resume/{repo}/{name}", post(api_resume))
         .route("/ws/{repo}/{name}", get(ws_upgrade))
         .with_state(Arc::new(Srv { token }));
 
@@ -291,6 +300,22 @@ fn snapshot() -> Result<Vec<SessionInfo>> {
             } else {
                 git::shortstat(&meta.worktree, &meta.base)
             };
+            // Stall triage for duet workers: surface the first review
+            // finding so a human can judge "valid → resume" from the
+            // card alone.
+            let (stalled, review, review_more) = match &meta.duet {
+                Some(d) if d.role == DuetRole::Worker => match DuetState::load(&meta.id()) {
+                    Ok(ds) if ds.awaiting == Awaiting::Stalled => {
+                        let (first, n) = std::fs::read_to_string(meta.worktree.join("REVIEW.md"))
+                            .ok()
+                            .and_then(|r| duet::review_excerpt(&r, 160))
+                            .unwrap_or_default();
+                        (true, first, n.saturating_sub(1))
+                    }
+                    _ => (false, String::new(), 0),
+                },
+                _ => (false, String::new(), 0),
+            };
             SessionInfo {
                 name: meta.name,
                 repo: meta.repo_name,
@@ -298,9 +323,34 @@ fn snapshot() -> Result<Vec<SessionInfo>> {
                 state: state_str(h),
                 age: age.map(krill_core::fmt_age).unwrap_or_else(|| "-".into()),
                 diff,
+                stalled,
+                review,
+                review_more,
             }
         })
         .collect())
+}
+
+/// POST /api/resume/{repo}/{name} — the card's one-click resume for a
+/// stalled duet (F1). Same transition as `krill resume`, no new rules.
+async fn api_resume(
+    State(srv): State<Arc<Srv>>,
+    Path((repo, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> std::result::Result<StatusCode, (StatusCode, String)> {
+    if !authed(&srv, &q, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, String::new()));
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        crate::commands::resume(&name, Some(&repo), None)
+    })
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?;
+    match out {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((StatusCode::CONFLICT, e.to_string())),
+    }
 }
 
 async fn api_preview(
