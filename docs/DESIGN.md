@@ -497,6 +497,18 @@ needs-you가 덮는다 — REPL이 입력을 기다리는 건 사실이라 완�
 레이어링(`hook_age <= log_age`)과 `${KRILL_SESSION_ID:-…}` 훅 식별은 실제
 에이전트의 훅 타이밍에서 그대로 성립했다.
 
+**Codex 리뷰어 dogfood에서 발견 (duet: worker=Claude, reviewer=Codex 실전
+검증).** 훅 없는 에이전트도 자기 notify 메커니즘으로 `krill hook`을 쏠 수
+있다 — Codex는 `-c notify=[...]`에 브리지 스크립트(턴 완료 JSON을 받아
+`krill hook done -i "$KRILL_SESSION_ID"` 실행)를 걸면 duet 심판이 그대로
+돌아간다. 어댑터=config 데이터 원칙이 실전에서 성립한 사례. 이를 위해
+`KRILL_SESSION_ID` 주입 조건에서 `hooks.is_some()` 게이트를 제거했다(훅리스
+에이전트도 세션 id는 알아야 브리지가 가능). 남은 이슈 ①: 심판이 리뷰
+지시를 send-keys로 보낼 때 Codex 컴포저가 텍스트는 받되 Enter가 제출로
+이어지지 않는 경우가 있다 — 텍스트와 Enter 사이 짧은 지연 또는 Enter 재전송
+검토, v0.1.x 후보. ② 전역 `~/.codex/config.toml`의 notify는 데스크톱 앱이
+쓰고 있을 수 있으므로 문서는 반드시 per-invocation `-c` 방식을 안내할 것.
+
 **웹 터미널 리사이즈.** tmux는 가장 작은 클라이언트에 맞춰 리렌더하므로 폰 접속이 로컬 화면을 좁힐 수 있다. v1은 웹 뷰 크기를 고정(80×24 기준)하고 세션당 "웹은 읽기 중심, 입력은 짧게"로 단순화, control mode 전환은 v2 과제로.
 
 **동시 입력.** 여러 기기가 같은 세션에 입력하면 마지막 입력이 이긴다. v1은 다른 클라이언트 접속 중임을 배지로 표시하는 것까지만.

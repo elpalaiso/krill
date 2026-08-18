@@ -236,7 +236,7 @@ fn spawn_reviewer_for(
     }
     let rev_id = format!("{}--{}", worker.repo_name, rev_name);
     let cmd = rev_cfg.cmd.replace("{prompt}", "").trim().to_string();
-    let cmd = if rev_cfg.hooks.is_some() && !cmd.is_empty() {
+    let cmd = if !cmd.is_empty() {
         format!("KRILL_SESSION_ID={} {cmd}", krill_core::shell_quote(&rev_id))
     } else {
         cmd
@@ -441,9 +441,10 @@ fn create_session_full(
         }
         None => agent_cfg.cmd.replace("{prompt}", "").trim().to_string(),
     };
-    // Hooked agents carry their session id in the environment so the
-    // shared settings.local.json reports the right session (§12.1).
-    let cmd = if agent_cfg.hooks.is_some() && !cmd.is_empty() {
+    // Every agent carries its session id in the environment: hooked agents'
+    // settings.local.json reads it (§12.1), and hookless agents can bridge
+    // their own notify mechanisms into `krill hook` with it.
+    let cmd = if !cmd.is_empty() {
         format!("KRILL_SESSION_ID={} {cmd}", krill_core::shell_quote(&session_id))
     } else {
         cmd
