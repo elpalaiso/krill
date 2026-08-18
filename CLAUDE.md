@@ -84,6 +84,11 @@ plan 메타는 `state/<id>.plan.kv`(krill-core/src/plan.rs — 파싱·상태 �
 함수), 훅 체인 순서는 flow → plan(planning만) → duet. ls FLOW 컬럼에
 plan:phase 표시. **M5 완료 — 로드맵 M0~M5 전부 ✅.**
 
+실기기 dogfood 완료(실제 claude 에이전트로 new → needs-you 훅 → 원격 승인
+→ diff → merge 가드 → 재지시 → merge 전 수명주기 검증). 발견 2건은
+DESIGN.md §13에 기록: 유휴 Notification이 done을 덮는 문제(payload 파싱으로
+구분 — v0.1.x 후보), worktree마다 폴더 신뢰 대화상자(우회하지 않고 문서 안내).
+
 다음: v0.1.0 태그 릴리스(release.yml 첫 실행 검증, Formula sha256 채우기),
 이후는 백로그(§13 리스크: --expose, 웹 리사이즈, control mode 등).
 
