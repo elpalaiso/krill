@@ -32,6 +32,7 @@ krill이 꺼져 있어도 에이전트는 계속 일합니다.
       -a <에이전트> · --reviewer <에이전트> · --gate <명령> · --max-rounds <N>
   krill plan <이름> -m \"목표\"         planner가 plan.md 분해 → 승인 후 작업마다 듀엣
   krill approve <이름>                plan.md 승인 — 작업 순회 시작 (작업 1개 = 커밋 1개)
+  krill resume <이름> [--rounds N]    스톨된 듀엣 재개 — 라운드 리셋, 캡 조정 가능
   krill attach <이름> [-r <리포>]     tmux 접속 (분리: Ctrl-b d)
   krill diff <이름> [--stat]          base 대비 변경 내용 (커밋 전 변경 포함)
   krill merge <이름> [--squash]       base에 머지 후 세션 정리 (base 체크아웃 상태에서)
@@ -68,6 +69,7 @@ usage:
       -a <agent> · --reviewer <agent> · --gate <cmd> · --max-rounds <N>
   krill plan <name> -m \"goal\"         planner decomposes into plan.md → duet per task
   krill approve <name>                approve plan.md — start the task walk (1 task = 1 commit)
+  krill resume <name> [--rounds N]    resume a stalled duet — rounds reset, cap adjustable
   krill attach <name> [-r <repo>]     attach to the tmux session (detach: Ctrl-b d)
   krill diff <name> [--stat]          changes vs base (uncommitted included)
   krill merge <name> [--squash]       merge into base + clean up (run with base checked out)
@@ -372,6 +374,34 @@ messages! {
     duet_gate_fix_instruction(round: u32, max: u32) => {
         en: "The gate command failed — see GATE.md and fix the code (round {round}/{max}).",
         ko: "게이트 명령이 실패했습니다 — GATE.md를 보고 코드를 고치세요 (라운드 {round}/{max}).",
+    }
+    plan_review_instruction(goal: &str) => {
+        en: "You are the reviewer in a krill plan walk. Current task: {goal}. Review ONLY the worktree's uncommitted changes — earlier tasks are already committed and reviewed. Do NOT edit code — write only REVIEW.md: first line exactly LGTM or ISSUES, then your findings.",
+        ko: "당신은 krill plan 순회의 리뷰어입니다. 현재 작업: {goal}. worktree의 커밋 전 변경만 리뷰하세요 — 이전 작업들은 이미 커밋·리뷰를 마쳤습니다. 코드는 수정하지 말고 REVIEW.md만 작성하세요: 첫 줄은 정확히 LGTM 또는 ISSUES, 이어서 지적 내용.",
+    }
+    duet_resume_instruction(max: u32) => {
+        en: "The duet was resumed by a human (rounds reset, cap {max}). Address the findings in REVIEW.md and/or GATE.md if present, finish the task, then stop.",
+        ko: "사람이 듀엣을 재개했습니다 (라운드 리셋, 캡 {max}). REVIEW.md나 GATE.md가 있으면 지적을 반영하고, 작업을 마무리한 뒤 멈추세요.",
+    }
+    resume_not_duet(name: &str) => {
+        en: "'{name}' is not a duet session — nothing to resume",
+        ko: "'{name}'은(는) 듀엣 세션이 아닙니다 — 재개할 것이 없습니다",
+    }
+    resume_on_reviewer(worker: &str) => {
+        en: "this is the reviewer half of a duet — resume via its worker: krill resume {worker}",
+        ko: "듀엣의 리뷰어 세션입니다 — worker로 재개하세요: krill resume {worker}",
+    }
+    resume_not_stalled(name: &str, awaiting: &str) => {
+        en: "duet '{name}' is not stalled (awaiting: {awaiting}) — nothing to resume",
+        ko: "듀엣 '{name}'은(는) 스톨 상태가 아닙니다 (awaiting: {awaiting}) — 재개할 것이 없습니다",
+    }
+    resume_done(name: &str, max: u32) => {
+        en: "duet '{name}' resumed — worker's turn (round cap {max})",
+        ko: "듀엣 '{name}' 재개 — worker 턴입니다 (라운드 캡 {max})",
+    }
+    resume_send_failed(name: &str) => {
+        en: "could not deliver the resume instruction to worker '{name}' — is its tmux session alive? (krill ls)",
+        ko: "worker '{name}'에게 재개 지시를 전달하지 못했습니다 — tmux 세션이 살아 있나요? (krill ls)",
     }
     duet_gate_run_failed(gate: &str) => {
         en: "failed to run the gate command: {gate}",

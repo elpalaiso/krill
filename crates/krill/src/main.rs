@@ -113,6 +113,11 @@ fn run() -> Result<()> {
             let name = o.pos.first().context(msg::name_required("approve"))?;
             commands::approve(name, o.val("--repo"))
         }
+        "resume" => {
+            let o = args::parse(rest, &[("-r", "--repo"), ("", "--rounds")], &[])?;
+            let name = o.pos.first().context(msg::name_required("resume"))?;
+            commands::resume(name, o.val("--repo"), o.val("--rounds"))
+        }
         "duet-gate" => {
             // Internal: the detached gate child spawned by the referee.
             let o = args::parse(rest, &[("-i", "--id")], &[])?;

@@ -62,10 +62,44 @@ DuetState의 `goal`이 아니라 **plan.md의 첫 미체크 박스에서 재유�
 보조: `plan_task_instruction`에 "plan.md 체크는 krill이 한다 — 편집
 금지" 문구 추가로 worker의 선의의 개입 차단.
 
-### 5. codex 훅 경고 오탐 (사소)
+### 5. codex 훅 경고 오탐 (사소) — ✅ 해소 (문서화)
+
+**해소 (2026-08-18)**: 경고는 `hooks` 부재 시, 주입은 `hooks =
+"claude-code"`일 때만이므로 — 자체 브리지 에이전트는 `hooks = "external"`
+(임의 값)로 경고만 끄면 된다. config 템플릿에 codex 예시 주석 추가.
 
 `[agents.codex]`가 notify 브리지(`krill-codex-notify` → `krill hook
 done`)로 훅을 처리하는데도 duet/plan 시작 시 "agent 'codex' has no hook
 preset" 경고가 뜬다. cmd에 내장된 notify 브리지를 인식하지 못함 —
 경고 억제 수단(예: `hooks = "codex-notify"` 프리셋 또는 무시 플래그)이
 필요하다.
+
+### 6. stalled 듀엣을 재개할 명령이 없다 — ✅ 수정됨
+
+**수정 (2026-08-18)**: `krill resume <name> [--rounds N]` 신설 — 전이는
+순수 머신의 `Event::Resume`(Stalled에서만 유효, 라운드 리셋, `--rounds`로
+캡 조정)이고 명령은 그 IO만 담당. worker에게 REVIEW.md/GATE.md 반영
+재개 지시를 전송한다.
+
+라운드 캡 초과로 `awaiting=stalled`가 되면(설계된 정지) duet::step은
+이후 모든 이벤트를 무시한다 — 사람이 개입해 재개할 공식 경로가 없어,
+`state/<id>.duet.kv`를 손으로 고쳐야 한다(awaiting=worker, round 조정).
+anago M0의 `anago join` 태스크에서 실제로 필요했다. 제안:
+`krill resume <name> [--rounds N]` — stalled 확인 후 awaiting=worker로
+되돌리고 worker에게 REVIEW.md 반영 지시를 재전송.
+
+### 7. plan 순회의 리뷰 범위가 브랜치 전체로 자람 — ✅ 수정됨 (범위 축소)
+
+**수정 (2026-08-18)**: plan Running 중의 리뷰 지시는
+`plan_review_instruction`(커밋 전 변경 = 현재 태스크 작업분만)으로 분기,
+단발 duet은 기존 전체 범위 유지. 순회 종료 후 1회의 전체 브랜치 리뷰
+(F단계 성격) 분리는 열린 제안으로 남김.
+
+`duet_review_instruction`이 "current changes vs its base (committed and
+uncommitted)"를 요구한다. 단발 duet에는 맞지만 plan 순회에서는 태스크마다
+커밋이 쌓여, 후반 태스크의 리뷰어는 매 라운드 브랜치 전체 diff를 다시
+리뷰한다(anago M0의 33번째 태스크 시점에 +14,106줄). 비용·소음이 태스크
+수에 비례해 커지고, 현재 태스크와 무관한 기존 코드 지적이 ISSUES로
+이어질 수 있다(라운드 캡 스톨의 원인(遠因) 후보). 제안: plan 순회의
+리뷰 지시에는 범위를 "uncommitted changes"(= 현재 태스크의 작업분)로
+좁히고, 전체 브랜치 리뷰는 순회 종료 후 1회(F단계 성격)로 분리.

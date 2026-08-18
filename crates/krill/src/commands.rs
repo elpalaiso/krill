@@ -1031,7 +1031,15 @@ fn advance_duet(id: &str) -> Option<String> {
             // into this one (§12.1 file lifecycle).
             let _ = std::fs::remove_file(&review_path);
             let _ = std::fs::remove_file(worker.worktree.join("GATE.md"));
-            if deliver_instruction(&reviewer, &m::duet_review_instruction(&next.goal), true) {
+            // Plan walks scope the review to the current task's work —
+            // the branch gains a commit per task, and re-reviewing the
+            // whole diff grows without bound (BACKLOG #7). One-shot
+            // duets keep the full branch-vs-base scope.
+            let text = match PlanState::load(&worker_id) {
+                Ok(ps) if ps.phase == PlanPhase::Running => m::plan_review_instruction(&next.goal),
+                _ => m::duet_review_instruction(&next.goal),
+            };
+            if deliver_instruction(&reviewer, &text, true) {
                 None
             } else {
                 let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
@@ -1076,9 +1084,44 @@ fn advance_duet(id: &str) -> Option<String> {
             let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
             Some(m::ntfy_duet_stalled(&worker.name, next.max_rounds))
         }
-        // Only the gate child can produce this event's actions.
-        Action::PingWorkerGate => None,
+        // Only the gate child (PingWorkerGate) and the resume command
+        // (PingWorkerResume) can produce these actions.
+        Action::PingWorkerGate | Action::PingWorkerResume => None,
     }
+}
+
+/// `krill resume <name> [--rounds N]` (BACKLOG #6) — the human override
+/// for a stalled duet: reset the rework rounds (optionally raising the
+/// cap) and hand the turn back to the worker. The state transition is
+/// `duet::step`'s — this is just its IO.
+pub fn resume(name: &str, repo: Option<&str>, rounds: Option<&str>) -> Result<()> {
+    let meta = session::find(name, repo)?;
+    if let Some(d) = &meta.duet {
+        if d.role == DuetRole::Reviewer {
+            bail!(m::resume_on_reviewer(&d.peer));
+        }
+    }
+    let worker_id = meta.id();
+    let Ok(state) = DuetState::load(&worker_id) else {
+        bail!(m::resume_not_duet(name));
+    };
+    let new_max: Option<u32> = match rounds {
+        Some(v) => match v.parse().ok().filter(|n: &u32| *n >= 1) {
+            Some(n) => Some(n),
+            None => bail!(m::duet_bad_rounds(v)),
+        },
+        None => None,
+    };
+    let (next, action) = duet::step(&state, Event::Resume { new_max });
+    if action.is_none() {
+        bail!(m::resume_not_stalled(name, state.awaiting.as_str()));
+    }
+    next.save(&worker_id)?;
+    if !deliver_instruction(&meta, &m::duet_resume_instruction(next.max_rounds), false) {
+        bail!(m::resume_send_failed(name));
+    }
+    println!("{}", m::resume_done(name, next.max_rounds));
+    Ok(())
 }
 
 /// `krill duet-gate -i <worker-id>` (internal) — the detached gate run.
