@@ -913,7 +913,14 @@ fn duet_complete_note(worker: &SessionMeta) -> Option<String> {
 fn plan_next_task(worker: &SessionMeta, mut ps: PlanState) -> Option<String> {
     let plan_path = worker.worktree.join("plan.md");
     let md = std::fs::read_to_string(&plan_path).ok()?;
-    let finished = plan::first_open_task(&md);
+    // The finished task is the duet goal — never re-derived from plan.md's
+    // first open box: if the worker edited plan.md mid-task (e.g. checked
+    // its own box), the first open box is already the NEXT task, which
+    // would get checked and committed without ever running.
+    let finished = DuetState::load(&worker.id())
+        .ok()
+        .map(|d| d.goal)
+        .or_else(|| plan::first_open_task(&md));
     if let Some(task) = &finished {
         let _ = std::fs::write(&plan_path, plan::check_task(&md, task));
     }
@@ -932,8 +939,12 @@ fn plan_next_task(worker: &SessionMeta, mut ps: PlanState) -> Option<String> {
         Some(next) => {
             // Fresh duet round for the next task.
             DuetState::new(ps.max_rounds, &ps.gate, &next).save(&worker.id()).ok()?;
-            let _ = tmux::send_line(&worker.tmux, &m::plan_task_instruction(&next));
-            Some(m::ntfy_plan_progress(&worker.name, done, total))
+            if deliver_instruction(worker, &m::plan_task_instruction(&next), false) {
+                Some(m::ntfy_plan_progress(&worker.name, done, total))
+            } else {
+                let _ = session::write_hook_state(&worker.id(), krill_core::session::HookState::NeedsYou);
+                Some(m::ntfy_duet_worker_dead(&worker.name))
+            }
         }
         None => {
             ps.phase = PlanPhase::Done;
@@ -941,6 +952,47 @@ fn plan_next_task(worker: &SessionMeta, mut ps: PlanState) -> Option<String> {
             Some(m::ntfy_plan_done(&worker.name))
         }
     }
+}
+
+/// Re-create a dead duet session's tmux half in place: same name, same
+/// worktree, same launch cmd (the meta stores it verbatim, env prefix
+/// included). Only worth doing for roles that carry no turn context —
+/// the reviewer gets its full instruction every round (§12.1).
+fn revive_session(meta: &SessionMeta) -> Result<()> {
+    tmux::new_session(&meta.tmux, &meta.worktree)?;
+    let log = meta.log_path()?;
+    if let Some(dir) = log.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    tmux::pipe_to_log(&meta.tmux, &log)?;
+    if !meta.cmd.is_empty() {
+        tmux::send_line(&meta.tmux, &meta.cmd)?;
+        // Give the agent TUI a beat to boot — an instruction typed into
+        // a still-loading pane lands in the shell instead (BACKLOG #2).
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    Ok(())
+}
+
+/// Deliver a referee instruction, instead of the old fire-and-forget
+/// `let _ = send_line(...)` (BACKLOG #1: a dead reviewer swallowed the
+/// instruction and the duet waited forever, silently). A dead target is
+/// revived first when `revive` is set; after sending, a delayed bare
+/// Enter re-submits in case the composer ate the first one (BACKLOG #3).
+/// `false` means the instruction could not be delivered — the caller
+/// must hand the duet to the human (needs-you + ntfy).
+fn deliver_instruction(meta: &SessionMeta, text: &str, revive: bool) -> bool {
+    if !tmux::has(&meta.tmux) {
+        if !revive || revive_session(meta).is_err() {
+            return false;
+        }
+    }
+    if tmux::send_line(&meta.tmux, text).is_err() {
+        return false;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let _ = tmux::press_enter(&meta.tmux);
+    true
 }
 
 /// The duet referee (M5b): map this session's Done to an Event, run the
@@ -979,16 +1031,28 @@ fn advance_duet(id: &str) -> Option<String> {
             // into this one (§12.1 file lifecycle).
             let _ = std::fs::remove_file(&review_path);
             let _ = std::fs::remove_file(worker.worktree.join("GATE.md"));
-            let _ = tmux::send_line(&reviewer.tmux, &m::duet_review_instruction(&next.goal));
-            None
+            if deliver_instruction(&reviewer, &m::duet_review_instruction(&next.goal), true) {
+                None
+            } else {
+                let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
+                Some(m::ntfy_duet_reviewer_dead(&worker.name))
+            }
         }
         Action::PingWorkerReview => {
-            let _ = tmux::send_line(&worker.tmux, &m::duet_fix_instruction(next.round, next.max_rounds));
-            None
+            if deliver_instruction(&worker, &m::duet_fix_instruction(next.round, next.max_rounds), false) {
+                None
+            } else {
+                let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
+                Some(m::ntfy_duet_worker_dead(&worker.name))
+            }
         }
         Action::ReinstructReviewer => {
-            let _ = tmux::send_line(&reviewer.tmux, &m::duet_review_missing());
-            None
+            if deliver_instruction(&reviewer, &m::duet_review_missing(), true) {
+                None
+            } else {
+                let _ = session::write_hook_state(&worker_id, krill_core::session::HookState::NeedsYou);
+                Some(m::ntfy_duet_reviewer_dead(&worker.name))
+            }
         }
         Action::RunGate => {
             // LGTM is consumed — REVIEW.md must not pollute gate/merge.
@@ -1048,8 +1112,12 @@ pub fn duet_gate(worker_id: &str) -> Result<()> {
     let note = match action {
         Action::Complete => duet_complete_note(&worker),
         Action::PingWorkerGate => {
-            let _ = tmux::send_line(&worker.tmux, &m::duet_gate_fix_instruction(next.round, next.max_rounds));
-            None
+            if deliver_instruction(&worker, &m::duet_gate_fix_instruction(next.round, next.max_rounds), false) {
+                None
+            } else {
+                let _ = session::write_hook_state(worker_id, krill_core::session::HookState::NeedsYou);
+                Some(m::ntfy_duet_worker_dead(&worker.name))
+            }
         }
         Action::Stall => {
             let _ = session::write_hook_state(worker_id, krill_core::session::HookState::NeedsYou);
