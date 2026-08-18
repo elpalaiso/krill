@@ -63,6 +63,14 @@ pub fn send_line(name: &str, line: &str) -> Result<()> {
     ok(&["send-keys", "-t", &t, "Enter"]).map(|_| ())
 }
 
+/// A bare Enter to the pane. TUI composers can swallow the Enter that
+/// `send_line` appends (observed on codex right after startup — the
+/// instruction sits typed but unsubmitted); a follow-up Enter is a no-op
+/// on an empty composer and the missing submit otherwise.
+pub fn press_enter(name: &str) -> Result<()> {
+    ok(&["send-keys", "-t", &pane_target(name), "Enter"]).map(|_| ())
+}
+
 /// Forward raw input (keystrokes, escape sequences) into the pane.
 /// `-l` sends the bytes literally instead of interpreting key names —
 /// the M2b web terminal feeds xterm.js onData through this.

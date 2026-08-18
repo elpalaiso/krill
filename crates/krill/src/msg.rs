@@ -389,6 +389,14 @@ messages! {
         en: "duet {name} needs you: round cap ({rounds}) reached",
         ko: "듀엣 {name} 확인 필요: 라운드 캡({rounds}) 도달",
     }
+    ntfy_duet_reviewer_dead(name: &str) => {
+        en: "duet {name} needs you: reviewer session died and could not be revived — attach and restart the review",
+        ko: "듀엣 {name} 확인 필요: 리뷰어 세션이 죽어 재기동에 실패했습니다 — attach해서 리뷰를 재개하세요",
+    }
+    ntfy_duet_worker_dead(name: &str) => {
+        en: "duet {name} needs you: could not deliver the instruction to the worker session — attach to resume",
+        ko: "듀엣 {name} 확인 필요: worker 세션에 지시를 전달하지 못했습니다 — attach해서 재개하세요",
+    }
     merge_on_reviewer(worker: &str) => {
         en: "this is the reviewer half of a duet — merge via its worker: krill merge {worker}",
         ko: "듀엣의 리뷰어 세션입니다 — worker로 머지하세요: krill merge {worker}",
@@ -434,8 +442,8 @@ messages! {
         ko: "승인 완료 — 작업 {open}개를 reviewer {reviewer}와 순회합니다. 첫 작업:",
     }
     plan_task_instruction(task: &str) => {
-        en: "Your next task (do NOT commit — krill commits when the review passes): {task}",
-        ko: "다음 작업입니다 (커밋하지 마세요 — 리뷰 통과 시 krill이 커밋합니다): {task}",
+        en: "Your next task (do NOT commit, and do NOT edit plan.md — krill checks the box and commits when the review passes): {task}",
+        ko: "다음 작업입니다 (커밋하지 마세요, plan.md도 편집하지 마세요 — 리뷰 통과 시 krill이 박스를 체크하고 커밋합니다): {task}",
     }
     ntfy_plan_ready(name: &str, total: usize) => {
         en: "plan {name} ready: {total} task(s) — review plan.md, then `krill approve {name}`",
