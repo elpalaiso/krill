@@ -161,6 +161,62 @@ pub fn progress(md: &str) -> (usize, usize) {
     (tasks.iter().filter(|(_, d)| *d).count(), tasks.len())
 }
 
+/// ls/TUI FLOW cell for a plan leader (design §12.1 decision 7):
+/// progress ("plan:12/41") while the walk runs, the phase otherwise.
+/// None when the session is not a plan leader.
+pub fn flow_label(id: &str, worktree: &std::path::Path) -> Option<String> {
+    let ps = PlanState::load(id).ok()?;
+    if ps.phase == PlanPhase::Running {
+        if let Ok(md) = std::fs::read_to_string(worktree.join("plan.md")) {
+            let (done, total) = progress(&md);
+            return Some(format!("plan:{done}/{total}"));
+        }
+    }
+    Some(format!("plan:{}", ps.phase.as_str()))
+}
+
+/// PR title for a plan walk: plan.md's first `# ` heading, which the
+/// planner conventionally writes ("# M0 구현 계획").
+pub fn pr_title(md: &str) -> Option<String> {
+    md.lines()
+        .find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string()))
+        .filter(|t| !t.is_empty())
+}
+
+/// PR body for a plan walk (design §12.1 decision 7): the goal, the
+/// checklist itself (it *is* the work log — 1 task = 1 commit), the
+/// gate contract, and a pointer to HUMAN-VERIFY.md when the walk left
+/// items only a human can verify.
+pub fn pr_body(md: &str, goal: &str, gate: &str, human_verify: bool) -> String {
+    let mut out = String::new();
+    out.push_str(&msg::pr_summary_heading());
+    out.push_str("\n\n");
+    out.push_str(goal.trim());
+    out.push_str("\n\n");
+    let (done, total) = progress(md);
+    out.push_str(&msg::pr_tasks_heading(done, total));
+    out.push_str("\n\n");
+    for line in md.lines() {
+        if parse_line(line).is_some() {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !gate.is_empty() {
+        out.push('\n');
+        out.push_str(&msg::pr_gate_note(gate));
+        out.push('\n');
+    }
+    if human_verify {
+        out.push('\n');
+        out.push_str(&msg::pr_human_verify_heading());
+        out.push_str("\n\n");
+        out.push_str(&msg::pr_human_verify_note());
+        out.push('\n');
+    }
+    out
+}
+
 /// Check off the first unchecked box whose text is `task`, preserving
 /// the rest of the document byte for byte.
 pub fn check_task(md: &str, task: &str) -> String {
@@ -219,6 +275,32 @@ intro prose
         );
         assert_eq!(progress(PLAN), (2, 5));
         assert!(parse_plan("no boxes here\n").is_empty());
+    }
+
+    #[test]
+    fn pr_title_is_the_first_heading() {
+        assert_eq!(pr_title(PLAN).as_deref(), Some("plan"));
+        assert_eq!(pr_title("no heading\n- [ ] task\n"), None);
+        assert_eq!(pr_title("#not a heading\n"), None);
+    }
+
+    #[test]
+    fn pr_body_carries_goal_checklist_gate_and_human_verify() {
+        let body = pr_body(PLAN, "the goal", "cargo test", true);
+        // Goal and progress heading.
+        assert!(body.contains("the goal"));
+        assert!(body.contains("(2/5)"));
+        // Checklist lines survive verbatim; prose does not.
+        assert!(body.contains("- [x] set up the module"));
+        assert!(body.contains("- [ ] final task"));
+        assert!(!body.contains("intro prose"));
+        // Gate contract and the human-verification pointer.
+        assert!(body.contains("`cargo test`"));
+        assert!(body.contains("HUMAN-VERIFY.md"));
+        // Without a gate or the file, those sections disappear.
+        let bare = pr_body(PLAN, "g", "", false);
+        assert!(!bare.contains("HUMAN-VERIFY.md"));
+        assert!(!bare.contains('`'));
     }
 
     #[test]

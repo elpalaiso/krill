@@ -652,6 +652,12 @@ impl App {
             .as_ref()
             .map(|f| format!("{}:{} · ", f.flow, f.stage))
             .or_else(|| {
+                // A plan leader shows walk progress (design §12.1
+                // decision 7); duets show the role.
+                krill_core::plan::flow_label(&r.meta.id(), &r.meta.worktree)
+                    .map(|l| format!("{l} · "))
+            })
+            .or_else(|| {
                 r.meta
                     .duet
                     .as_ref()

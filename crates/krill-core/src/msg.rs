@@ -130,6 +130,26 @@ crate::messages! {
         en: "failed to parse the duet state file",
         ko: "듀엣 상태 파일 파싱 실패",
     }
+    pr_summary_heading() => {
+        en: "## Summary",
+        ko: "## 요약",
+    }
+    pr_tasks_heading(done: usize, total: usize) => {
+        en: "## Tasks ({done}/{total})",
+        ko: "## 작업 ({done}/{total})",
+    }
+    pr_gate_note(gate: &str) => {
+        en: "Each task was committed only after a review (LGTM) and a passing gate: `{gate}`.",
+        ko: "각 작업은 리뷰(LGTM)와 게이트 `{gate}` 통과 후에만 커밋되었습니다.",
+    }
+    pr_human_verify_heading() => {
+        en: "## Human verification needed",
+        ko: "## 사람 확인 필요",
+    }
+    pr_human_verify_note() => {
+        en: "Some items cannot be verified by the agents — see the `HUMAN-VERIFY.md` checklist before/after merging.",
+        ko: "에이전트가 검증할 수 없는 항목이 있습니다 — 머지 전후로 `HUMAN-VERIFY.md` 체크리스트를 확인하세요.",
+    }
 }
 
 #[cfg(test)]

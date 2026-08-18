@@ -419,6 +419,22 @@ messages! {
         en: "duet {name} needs you: round cap ({rounds}) reached",
         ko: "듀엣 {name} 확인 필요: 라운드 캡({rounds}) 도달",
     }
+    stall_review_note(first: &str) => {
+        en: " · review: {first}",
+        ko: " · 리뷰: {first}",
+    }
+    stall_review_note_more(first: &str, more: usize) => {
+        en: " · review: {first} (+{more} more)",
+        ko: " · 리뷰: {first} (외 {more}건)",
+    }
+    duet_nudge_instruction() => {
+        en: "Your previous turn appears to have been cut short — pick the current task back up and finish it (address REVIEW.md/GATE.md first if present).",
+        ko: "직전 턴이 중단된 것으로 보입니다 — 진행하던 작업을 이어서 완료하세요 (REVIEW.md/GATE.md가 있으면 먼저 반영).",
+    }
+    ntfy_duet_idle_stalled(name: &str) => {
+        en: "duet {name} needs you: worker idle again after a nudge — resume with `krill resume {name}`",
+        ko: "듀엣 {name} 확인 필요: 재지시 후에도 worker가 유휴 상태 — `krill resume {name}`으로 재개하세요",
+    }
     ntfy_duet_reviewer_dead(name: &str) => {
         en: "duet {name} needs you: reviewer session died and could not be revived — attach and restart the review",
         ko: "듀엣 {name} 확인 필요: 리뷰어 세션이 죽어 재기동에 실패했습니다 — attach해서 리뷰를 재개하세요",
