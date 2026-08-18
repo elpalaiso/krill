@@ -52,6 +52,8 @@ krill new add-tests -a codex -m "테스트 보강"   # 병렬로 하나 더
 
 krill                               # 세션 목록·상태·diff 통계
 krill attach fix-login              # 들어가서 확인 (분리: Ctrl-b d)
+# Claude Code는 새 worktree마다 폴더 신뢰를 한 번 묻습니다(◆ needs-you로 표시).
+# attach하거나 웹 UI 퀵 리플라이(⏎)로 응답하면 됩니다.
 krill diff fix-login                # base 대비 변경 (커밋 전 포함)
 krill rm fix-login                  # tmux+worktree+브랜치 정리
 ```
