@@ -21,6 +21,10 @@ h1 small { color: #7d8590; font-weight: normal; font-size: 13px; }
   cursor: pointer; background: #161b22;
 }
 .card:active { background: #1f2630; }
+.stall { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.stall .why { color: #e0af68; font-size: 12px; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.stall button { min-width: 64px; }
 .row1 { display: flex; align-items: center; gap: 8px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #7d8590; }
 .active .dot { background: #3fb950; }
@@ -110,6 +114,26 @@ function render(list) {
     el.querySelector('.meta').textContent = `${s.age} · ${s.diff}`;
     el.querySelector('.sub').textContent = `${s.repo} · ${s.agent} · ${s.state}`;
     el.onclick = () => openTerm(s);
+    if (s.stalled) {
+      const row = document.createElement('div');
+      row.className = 'stall';
+      const why = document.createElement('span');
+      why.className = 'why';
+      why.textContent = s.review
+        ? (s.review_more ? `${s.review} (+${s.review_more})` : s.review)
+        : 'stalled';
+      const btn = document.createElement('button');
+      btn.textContent = 'resume';
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        btn.disabled = true;
+        const r = await fetch(`/api/resume/${encodeURIComponent(s.repo)}/${encodeURIComponent(s.name)}` + qs, { method: 'POST' });
+        if (!r.ok) { btn.disabled = false; alert(await r.text() || 'resume failed'); }
+        refresh();
+      };
+      row.append(why, btn);
+      el.appendChild(row);
+    }
     cards.appendChild(el);
   }
 }

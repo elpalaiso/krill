@@ -124,6 +124,13 @@ fn run() -> Result<()> {
             let id = o.val("--id").context(msg::hook_usage())?;
             commands::duet_gate(id)
         }
+        "duet-nudge" => {
+            // Internal: the detached backoff re-check after a nudge
+            // (design §12.1 decision 7, BACKLOG #11).
+            let o = args::parse(rest, &[("-i", "--id"), ("-d", "--delay")], &[])?;
+            let id = o.val("--id").context(msg::hook_usage())?;
+            commands::duet_nudge(id, o.val("--delay").unwrap_or("60"))
+        }
         "hook" => {
             let o = args::parse(rest, &[("-i", "--id")], &[])?;
             let state = o.pos.first().context(msg::hook_usage())?;

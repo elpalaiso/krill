@@ -87,10 +87,26 @@ pub struct DuetState {
     /// The task goal, echoed into review instructions.
     pub goal: String,
     pub awaiting: Awaiting,
-    /// The worker was re-nudged once this turn after going idle
-    /// (aborted provider turn — design §12.1 decision 7). A second
-    /// idle escalates to Stalled instead of nudging forever.
-    pub nudged: bool,
+    /// Continue-nudges sent this worker turn after it went idle
+    /// (aborted provider turn — design §12.1 decision 7). Retried on a
+    /// backoff by the detached `duet-nudge` child (BACKLOG #11); at
+    /// `MAX_NUDGES` the next idle escalates to Stalled.
+    pub nudges: u32,
+}
+
+/// Continue-nudges per worker turn before an idle escalates to Stalled.
+pub const MAX_NUDGES: u32 = 3;
+
+/// How long the detached nudge child waits before re-checking after the
+/// n-th nudge (1-based). Transient provider failures (e.g. 529) need
+/// time, not immediacy — 1m → 5m → 15m, then the cap stalls.
+pub fn nudge_delay(nudges_sent: u32) -> Option<u64> {
+    match nudges_sent {
+        1 => Some(60),
+        2 => Some(300),
+        3 => Some(900),
+        _ => None,
+    }
 }
 
 impl DuetState {
@@ -101,7 +117,7 @@ impl DuetState {
             gate: gate.to_string(),
             goal: goal.to_string(),
             awaiting: Awaiting::Worker,
-            nudged: false,
+            nudges: 0,
         }
     }
 
@@ -112,7 +128,7 @@ impl DuetState {
         m.insert("gate".into(), self.gate.clone());
         m.insert("goal".into(), self.goal.clone());
         m.insert("awaiting".into(), self.awaiting.as_str().into());
-        m.insert("nudged".into(), self.nudged.to_string());
+        m.insert("nudges".into(), self.nudges.to_string());
         m
     }
 
@@ -127,8 +143,12 @@ impl DuetState {
             goal: m.get("goal").cloned().unwrap_or_default(),
             awaiting: Awaiting::parse(&req("awaiting")?)
                 .with_context(|| msg::meta_field_missing("awaiting"))?,
-            // Absent in pre-M5d state files — an old walk resumes clean.
-            nudged: m.get("nudged").map(|v| v == "true").unwrap_or(false),
+            // Absent in pre-M5d files (an old walk resumes clean); the
+            // short-lived bool form "nudged" counts as one nudge.
+            nudges: match m.get("nudges") {
+                Some(v) => v.parse().context(msg::duet_state_parse_failed())?,
+                None => u32::from(m.get("nudged").map(|v| v == "true").unwrap_or(false)),
+            },
         })
     }
 
@@ -285,17 +305,17 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
     let action = match (state.awaiting, event) {
         (Awaiting::Worker, Event::WorkerDone) => {
             next.awaiting = Awaiting::Reviewer;
-            next.nudged = false;
+            next.nudges = 0;
             Action::PingReviewer
         }
         (Awaiting::Worker, Event::WorkerIdle) => {
-            if state.nudged {
-                // Nudged once already and it went idle again — a human
-                // is needed; `krill resume` is the recovery path.
+            if state.nudges >= MAX_NUDGES {
+                // The backoff is exhausted and it is still idle — a
+                // human is needed; `krill resume` is the recovery path.
                 next.awaiting = Awaiting::Stalled;
                 Action::Stall
             } else {
-                next.nudged = true;
+                next.nudges += 1;
                 Action::NudgeWorker
             }
         }
@@ -311,7 +331,7 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
             Verdict::Issues if state.round < state.max_rounds => {
                 next.round += 1;
                 next.awaiting = Awaiting::Worker;
-                next.nudged = false;
+                next.nudges = 0;
                 Action::PingWorkerReview
             }
             Verdict::Missing if state.round < state.max_rounds => {
@@ -337,14 +357,14 @@ pub fn step(state: &DuetState, event: Event) -> (DuetState, Option<Action>) {
                 next.max_rounds = mx;
             }
             next.awaiting = Awaiting::Worker;
-            next.nudged = false;
+            next.nudges = 0;
             Action::PingWorkerResume
         }
         (Awaiting::Gate, Event::GateFinished { pass: false }) => {
             if state.round < state.max_rounds {
                 next.round += 1;
                 next.awaiting = Awaiting::Worker;
-                next.nudged = false;
+                next.nudges = 0;
                 Action::PingWorkerGate
             } else {
                 next.awaiting = Awaiting::Stalled;
@@ -367,20 +387,34 @@ mod tests {
             gate: gate.into(),
             goal: "the goal".into(),
             awaiting,
-            nudged: false,
+            nudges: 0,
         }
     }
 
     #[test]
-    fn idle_worker_is_nudged_once_then_stalls() {
-        let (next, a) = step(&st(0, 2, "", Awaiting::Worker), Event::WorkerIdle);
-        assert_eq!(a, Some(Action::NudgeWorker));
-        assert!(next.nudged);
-        assert_eq!(next.awaiting, Awaiting::Worker);
-        // A second idle after the nudge calls the human.
-        let (next2, a2) = step(&next, Event::WorkerIdle);
-        assert_eq!(a2, Some(Action::Stall));
-        assert_eq!(next2.awaiting, Awaiting::Stalled);
+    fn idle_worker_is_nudged_on_backoff_then_stalls() {
+        let mut s = st(0, 2, "", Awaiting::Worker);
+        // Each idle burns one nudge, with a growing re-check delay…
+        for n in 1..=MAX_NUDGES {
+            let (next, a) = step(&s, Event::WorkerIdle);
+            assert_eq!(a, Some(Action::NudgeWorker));
+            assert_eq!(next.nudges, n);
+            assert_eq!(next.awaiting, Awaiting::Worker);
+            assert!(nudge_delay(n).is_some());
+            s = next;
+        }
+        assert_eq!(nudge_delay(MAX_NUDGES + 1), None);
+        // …and one more idle past the cap calls the human.
+        let (next, a) = step(&s, Event::WorkerIdle);
+        assert_eq!(a, Some(Action::Stall));
+        assert_eq!(next.awaiting, Awaiting::Stalled);
+    }
+
+    #[test]
+    fn nudge_delays_grow() {
+        assert_eq!(nudge_delay(1), Some(60));
+        assert_eq!(nudge_delay(2), Some(300));
+        assert_eq!(nudge_delay(3), Some(900));
     }
 
     #[test]
@@ -392,21 +426,21 @@ mod tests {
     }
 
     #[test]
-    fn nudged_resets_when_a_fresh_worker_turn_starts() {
+    fn nudges_reset_when_a_fresh_worker_turn_starts() {
         let mut s = st(0, 2, "", Awaiting::Worker);
-        s.nudged = true;
-        // Completing the turn clears it…
+        s.nudges = 2;
+        // Completing the turn clears them…
         let (next, _) = step(&s, Event::WorkerDone);
-        assert!(!next.nudged);
+        assert_eq!(next.nudges, 0);
         // …as do a rework round and a human resume.
         let mut rev = st(0, 2, "", Awaiting::Reviewer);
-        rev.nudged = true;
+        rev.nudges = 2;
         let (next, _) = step(&rev, Event::ReviewerDone(Verdict::Issues));
-        assert!(!next.nudged);
+        assert_eq!(next.nudges, 0);
         let mut stalled = st(2, 2, "", Awaiting::Stalled);
-        stalled.nudged = true;
+        stalled.nudges = 3;
         let (next, _) = step(&stalled, Event::Resume { new_max: None });
-        assert!(!next.nudged);
+        assert_eq!(next.nudges, 0);
     }
 
     #[test]

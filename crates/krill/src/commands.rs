@@ -899,14 +899,21 @@ enum IdleNudge {
 
 /// Design §12.1 decision 7: an idle Notification while the duet awaits
 /// the worker means the turn was cut short (e.g. a provider API error)
-/// — without this, the duet waits forever with no signal. Nudge once
-/// per turn; a second idle escalates to Stalled so `krill resume` can
-/// recover. Permission prompts and unknown payloads are NEVER answered
-/// with typed input — send-keys into a dialog presses arbitrary buttons.
+/// — without this, the duet waits forever with no signal. Permission
+/// prompts and unknown payloads are NEVER answered with typed input —
+/// send-keys into a dialog presses arbitrary buttons.
 fn nudge_idle_worker(id: &str, payload: &str) -> IdleNudge {
     if duet::classify_notification(payload) != duet::NotificationKind::Idle {
         return IdleNudge::NotHandled;
     }
+    advance_worker_idle(id)
+}
+
+/// Feed WorkerIdle to the referee and execute the outcome: nudge the
+/// worker to continue and schedule the backoff re-check (BACKLOG #11),
+/// or — nudges exhausted / undeliverable — escalate to Stalled. Shared
+/// by the needs-you hook and the detached `duet-nudge` child.
+fn advance_worker_idle(id: &str) -> IdleNudge {
     let Ok(meta) = session::find_by_id(id) else {
         return IdleNudge::NotHandled;
     };
@@ -923,22 +930,84 @@ fn nudge_idle_worker(id: &str, payload: &str) -> IdleNudge {
                 return IdleNudge::NotHandled;
             }
             if deliver_instruction(&meta, &m::duet_nudge_instruction(), false) {
+                spawn_nudge_child(id, next.nudges);
                 IdleNudge::Nudged
             } else {
-                // Undeliverable (dead tmux): burn the retry through the
-                // same machine so resume finds a proper Stalled state.
-                let (next2, a2) = duet::step(&next, Event::WorkerIdle);
-                if a2 == Some(Action::Stall) {
-                    let _ = next2.save(id);
+                // Undeliverable (dead tmux): burn the remaining retries
+                // through the same machine so `krill resume` finds a
+                // proper Stalled state.
+                let mut cur = next;
+                loop {
+                    let (n2, a2) = duet::step(&cur, Event::WorkerIdle);
+                    match a2 {
+                        Some(Action::NudgeWorker) => cur = n2,
+                        Some(Action::Stall) => {
+                            let _ = n2.save(id);
+                            break;
+                        }
+                        _ => break,
+                    }
                 }
+                let _ = session::write_hook_state(id, krill_core::session::HookState::NeedsYou);
                 IdleNudge::Stalled(m::ntfy_duet_worker_dead(&meta.name))
             }
         }
         Some(Action::Stall) => {
             let _ = next.save(id);
+            let _ = session::write_hook_state(id, krill_core::session::HookState::NeedsYou);
             IdleNudge::Stalled(m::ntfy_duet_idle_stalled(&meta.name))
         }
         _ => IdleNudge::NotHandled,
+    }
+}
+
+/// After the n-th nudge, schedule the backoff re-check as a detached
+/// short-lived child (the `duet-gate` pattern — daemon-0 stays true).
+/// Transient provider failures (529 etc.) need time, not immediacy;
+/// the child also covers agents whose idle Notification never re-fires.
+fn spawn_nudge_child(id: &str, nudges_sent: u32) {
+    let Some(delay) = duet::nudge_delay(nudges_sent) else {
+        return;
+    };
+    let exe = std::env::current_exe().unwrap_or_else(|_| "krill".into());
+    let _ = Command::new(exe)
+        .args(["duet-nudge", "-i", id, "-d", &delay.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// `krill duet-nudge -i <id> -d <secs>` (internal) — the detached
+/// backoff re-check. Sleeps, then looks again: if the duet has moved on
+/// or the worker is producing output, vanish quietly; if it is still
+/// idle, nudge again (which schedules the next check) or stall.
+pub fn duet_nudge(id: &str, delay: &str) -> Result<()> {
+    let secs: u64 = delay.parse().unwrap_or(60);
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    let Ok(state) = DuetState::load(id) else {
+        return Ok(());
+    };
+    if state.awaiting != Awaiting::Worker {
+        return Ok(()); // the walk moved on — nothing to do
+    }
+    let Ok(meta) = session::find_by_id(id) else {
+        return Ok(());
+    };
+    let live = tmux::server_sessions();
+    let (status, _) = session::status(&meta, &live);
+    match status {
+        // Producing output or already finished a turn — the hooks own
+        // the next step; this child has nothing to add.
+        Status::Active | Status::Done => Ok(()),
+        _ => {
+            if let IdleNudge::Stalled(body) = advance_worker_idle(id) {
+                if let Some(topic) = Config::load().ok().and_then(|c| c.ntfy_topic) {
+                    ntfy_push(&topic, &body);
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1026,6 +1095,20 @@ fn plan_next_task(worker: &SessionMeta, mut ps: PlanState) -> Option<String> {
     let (done, total) = plan::progress(&md);
     match plan::first_open_task(&md) {
         Some(next) => {
+            // Long walks exhaust the worker's context (BACKLOG #9):
+            // every `compact_every` completed tasks, type the agent's
+            // compaction command before the next task. Config data —
+            // agents without one are left alone (principle 2).
+            if let Ok(cfg) = Config::load() {
+                let every = cfg.duet.compact_every.unwrap_or(0);
+                if every > 0 && done > 0 && done % every as usize == 0 {
+                    if let Some(compact) =
+                        cfg.agents.get(&worker.agent).and_then(|a| a.compact.clone())
+                    {
+                        let _ = deliver_instruction(worker, &compact, false);
+                    }
+                }
+            }
             // Fresh duet round for the next task.
             DuetState::new(ps.max_rounds, &ps.gate, &next).save(&worker.id()).ok()?;
             if deliver_instruction(worker, &m::plan_task_instruction(&next), false) {
